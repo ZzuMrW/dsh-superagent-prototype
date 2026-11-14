@@ -4,7 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { dirname } from 'node:path'
+import { dirname, posix } from 'node:path'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
@@ -19,6 +19,9 @@ import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
 import type { RegisterTool, Tool } from './tools/tool.ts'
+import { registerWslExecution, wslExecutionFor, wslWorkspacePath, type WslExecutionBinding } from './wsl-world.ts'
+import { guestPath } from '../infra/wsl.ts'
+import { assertWslShellHealthy } from '../wsl-shell.ts'
 
 /** Host dependencies used by `Sessions`. */
 export interface SessionsHost {
@@ -31,6 +34,8 @@ export interface SessionsHost {
   readonly health: HealthEntry
   readonly masterId: string
   readonly lifetime: AbortSignal
+  /** Configured guest environment, read lazily after Setup completes. */
+  executionBinding?(): WslExecutionBinding | undefined
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
@@ -42,10 +47,12 @@ export interface SessionsHost {
  * What Sessions registered for an agent it decorated: the releases of its prompt section, tools and skill scope, the scope
  * its skills are registered in, and the skills of one prompt revision; for a worker's subagent, only its tool limits.
  */
-interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: { revision: number; dispose: () => void }; subagent?: true }
+interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: { revision: number; dispose: () => void }; subagent?: true; execution?: () => void }
 
 /** The agent presets Executor Sessions and the main Session are created with, which the bundle's patch defines. */
 export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-superagent-router'
+// The wsl- prefix opts out of workspace's browser auto-variant rebinding and host variant generation.
+export const WSL_WORKER_PRESET = 'wsl-dsh-superagent-worker', WSL_ROUTER_PRESET = 'wsl-dsh-superagent-router'
 declare module '@deepseek-ai/cordis' {
   interface Events {
     /** DSH's agent preset registry selected `agentPreset` for a Session. */
@@ -124,7 +131,7 @@ export class Sessions {
     ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
         const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
-        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
+        const ours = sessionId === this.host.masterId ? this.preset('orchestrator') : ticketId && this.host.store.tickets.get(ticketId) ? this.preset('worker') : undefined
         if (!ours || preset === ours || !agent) return
         const presets = child.get('agentPresets') as { select(agent: Agent, preset: string): Promise<string> }
         presets.select(agent, ours).catch(() => {})
@@ -137,15 +144,31 @@ export class Sessions {
   /** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, sets `danger-full-access` permissions, and renames it to `title`. */
   async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker'): Promise<Agent> {
     const ctx = this.ctx
+    const execution = this.host.executionBinding?.()
+    if (execution?.machine.wsl) assertWslShellHealthy(id)
+    const workspaceCwd = execution?.machine.wsl ? wslWorkspacePath(guestPath(execution.machine, cwd), execution.machine.wsl.distro) : cwd
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
     if ('error' in result && result.error.code === 'session/not-found') {
-      const workspace = await ctx.workspaceRegistry.create(cwd)
+      const workspace = await ctx.workspaceRegistry.create(workspaceCwd)
       // A Session keeps the preset it was created with, one of the bundle's own (cordis.patch.yml).
       await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: workspace.id,
-        agentPreset: role === 'worker' ? WORKER_PRESET : ROUTER_PRESET })
+        agentPreset: this.preset(role) })
       result = await ctx.sessionController.resolveAgent(id as SessionId)
     }
     if ('error' in result) throw result.error
+    if (execution?.machine.wsl) {
+      const presets = ctx.get('agentPresets') as { presetForSession(session: Agent['session']): string | null; select(agent: Agent, preset: string): Promise<string> }
+      const wanted = this.preset(role)
+      if (presets.presetForSession(result.agent.session) !== wanted) await presets.select(result.agent, wanted)
+      // Never silently reuse a historical Windows workspace with a new WSL execution backend.
+      const retainedCwd = result.agent.session.header.cwd
+      if (!retainedCwd) throw new Error('WSL Session has no workspace')
+      const retainedGuest = guestPath(execution.machine, retainedCwd)
+      wslWorkspacePath(retainedGuest, execution.machine.wsl.distro)
+      if (posix.normalize(retainedGuest) !== posix.normalize(guestPath(execution.machine, cwd))) {
+        throw new Error('Existing WSL Session belongs to a different workspace; use a fresh state directory instead of silently reusing it')
+      }
+    }
     const settings = this.host.store.settings()
     await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
     await this.decorate(result.agent)
@@ -161,6 +184,7 @@ export class Sessions {
   /** Deliver a message once per request id: to the next turn, the current one, or `inject`ed with its label without waking the agent. */
   async prompt(sessionId: string, requestId: string, text: string, mode: 'queue' | 'steer' | { inject: string }, authorize?: () => void,
     accepted?: () => void): Promise<void> {
+    if (this.host.executionBinding?.()?.machine.wsl) assertWslShellHealthy(sessionId)
     const result = await this.ctx.sessionController.resolveAgent(sessionId as SessionId)
     if ('error' in result) throw result.error
     await this.agentDelivery.send(result.agent, key(requestId), text, mode, this.host.lifetime, authorize, accepted)
@@ -229,14 +253,33 @@ export class Sessions {
     const ticketId = ticketOfSession(agent.id)
     return ticketId === undefined ? undefined : this.host.store.tickets.get(ticketId)
   }
+  private preset(role: 'orchestrator' | 'worker'): string {
+    return this.host.executionBinding?.()?.machine.wsl
+      ? role === 'worker' ? WSL_WORKER_PRESET : WSL_ROUTER_PRESET
+      : role === 'worker' ? WORKER_PRESET : ROUTER_PRESET
+  }
+  private bindExecution(agent: Agent, binding: SessionBinding, ticket?: Ticket): void {
+    const execution = this.host.executionBinding?.()
+    if (!execution?.machine.wsl) return
+    binding.execution?.()
+    binding.execution = registerWslExecution(agent.id, execution, () => ticket
+      ? Object.fromEntries(this.host.environment(this.host.store.tickets.get(ticket.id) ?? ticket).map(item => [item.key, item.value])) : {})
+  }
   private async decorate(agent: Agent): Promise<void> {
-    if (this.bindings.has(agent)) return
+    const previous = this.bindings.get(agent)
+    if (previous) { if (!previous.subagent) this.bindExecution(agent, previous, this.ticketOf(agent)); return }
     const host = this.host
     const master = agent.id === host.masterId
     const ticket = master ? undefined : this.ticketOf(agent)
-    if (!master && !ticket) { this.limitSubagent(agent); return }
+    if (!master && !ticket) { await this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
     this.bindings.set(agent, binding)
+    this.bindExecution(agent, binding, ticket)
+    binding.disposers.push(agent.ctx.tools.guard(execution => {
+      if (!wslExecutionFor(agent.id) || !['bash', 'pwsh', 'write', 'edit', 'subagent', 'workflow'].includes(execution.name)) return undefined
+      try { assertWslShellHealthy(agent.id); return undefined }
+      catch (error) { return error instanceof Error ? error.message : String(error) }
+    }))
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
     this.updateModelHealth()
@@ -277,7 +320,8 @@ export class Sessions {
       const projections = this.ctx.get('sessionProjections') as { stateOf?: (session: Agent['session'], key: string) => unknown } | undefined
       const selected = typeof presets?.presetForSession === 'function' ? presets.presetForSession(agent.session)
         : projections?.stateOf?.(agent.session, 'agentPreset')
-      return (selected ?? agent.session.header.agentPreset) === ROUTER_PRESET
+      const preset = selected ?? agent.session.header.agentPreset
+      return typeof preset === 'string' && [ROUTER_PRESET, WSL_ROUTER_PRESET].includes(preset)
     } catch { return false }
   }
   /**
@@ -290,7 +334,10 @@ export class Sessions {
     const store = this.host.store
     const parent = scopeParentOf(agent)
     const allow = WORK_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
-    return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
+    return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(execution => {
+      if (wslExecutionFor(agent.id) && (execution.name === 'subagent' || execution.name.startsWith('subagent_') || execution.name === 'workflow')) {
+        return 'WSL workers do not support delegation on this DSH release; complete the authorized ticket in this Session'
+      }
       const current = store.tickets.get(ticketId)
       return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : undefined
     })]
@@ -300,7 +347,7 @@ export class Sessions {
    * permissions, gets the same work tools as the worker, and none once the worker's ticket ended. Any other agent is left as
    * it is.
    */
-  private limitSubagent(agent: Agent): void {
+  private async limitSubagent(agent: Agent): Promise<void> {
     let parent = agent.session.header.parentSession
     // Up the subagents' parents to the worker, which are loaded while their subagents run.
     for (let depth = 0; parent !== undefined && ticketOfSession(parent) === undefined && depth < 8; depth++) {
@@ -308,7 +355,14 @@ export class Sessions {
     }
     const ticketId = parent === undefined ? undefined : ticketOfSession(parent)
     if (ticketId === undefined || !this.host.store.tickets.get(ticketId)) return
-    this.bindings.set(agent, { disposers: this.workOnly(agent, ticketId), subagent: true })
+    const execution = parent === undefined ? undefined : wslExecutionFor(parent)
+    if (execution?.machine.wsl) {
+      const presets = this.ctx.get('agentPresets') as { select(agent: Agent, preset: string): Promise<string> }
+      await presets.select(agent, WSL_WORKER_PRESET)
+    }
+    const binding: SessionBinding = { disposers: this.workOnly(agent, ticketId), subagent: true }
+    this.bindings.set(agent, binding)
+    if (execution) binding.execution = registerWslExecution(agent.id, execution, execution.variables)
   }
   /** Register the skills of a prompt version in the agent's skill scope, in place of an earlier version's. */
   private bindSkills(binding: SessionBinding, version: PromptVersion): void {
@@ -343,6 +397,7 @@ export class Sessions {
     if (!binding) return
     this.bindings.delete(agent)
     binding.skills?.dispose()
+    binding.execution?.()
     for (const dispose of binding.disposers.splice(0).reverse()) {
       try { dispose() } catch (error) { this.ctx.logger.warn('dsh-superagent could not release what it registered for a Session: %s', String(error)) }
     }

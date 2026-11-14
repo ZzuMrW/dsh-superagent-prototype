@@ -8,12 +8,27 @@ import { z } from 'zod'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
 import { SetupError } from './setup.ts'
+import { resolveWslExecutable } from './infra/wsl.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
-const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
+const absolute = (description: string) => s.string().pattern(/^(?:\/|[A-Za-z]:[\\/]|\\\\)/).description(`${description} Absolute Host path.`)
+export interface WslTarget { distro: string; user: string; workRoot: string }
+/** Explicit public output avoids leaking a transitive Cosmokit Dict type into emitted declarations. */
+export interface DeploymentConfig {
+  stateDir: string
+  wsl: false | WslTarget
+  promptMaxChars: Volatile<number>
+  admissionContextMaxPages: Volatile<number>
+  admissionContextTimeoutMs: Volatile<number>
+}
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
-export const Config = s.object({
+export const Config: Schemastery<Record<string, unknown>, DeploymentConfig> = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
+  wsl: s.union([s.const(false), s.object({
+    distro: s.string().pattern(/^[A-Za-z0-9._-]+$/).required(),
+    user: s.string().pattern(/^[A-Za-z0-9_-]+$/).required(),
+    workRoot: s.string().pattern(/^\//).required(),
+  })]).default(false).description('Optional Windows Host execution target. False keeps native execution; otherwise repository commands run in this WSL distribution/user.'),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),
   admissionContextMaxPages: s.number().min(LIMITS.admissionContextMaxPages.min).max(LIMITS.admissionContextMaxPages.max).step(1).default(10)
@@ -21,9 +36,9 @@ export const Config = s.object({
   admissionContextTimeoutMs: s.number().min(LIMITS.admissionContextTimeoutMs.min).max(LIMITS.admissionContextTimeoutMs.max).step(1)
     .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
 })
-export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
   stateDir: string
+  wsl?: { distro: string; user: string; workRoot: string }
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
@@ -38,8 +53,10 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  const { stateDir, wsl, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
+  if (wsl && !/^[A-Za-z]:[\\/]/.test(stateDir)) throw new Error('WSL mode stateDir must be an absolute local Windows drive path, not POSIX or UNC')
+  if (wsl && /^\/mnt\/[A-Za-z](?:\/|$)/.test(wsl.workRoot)) throw new Error('WSL workRoot must be in the distribution filesystem, not /mnt/<drive>')
+  return { stateDir, ...(wsl ? { wsl } : {}), promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
 }
 
 export const GithubAccountsSchema = z.object({
@@ -91,7 +108,7 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   if (!remote) throw new SetupError('repositoryUnset')
   if (!accounts.cli) throw new SetupError('agentCliUnset')
   let cli: string
-  try { cli = executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
+  try { cli = machine.wsl ? await resolveWslExecutable(machine, accounts.cli, probe) : executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
   const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
   const agent = parsed(GithubUser, text)
   if (!agent) throw new SetupError('agentCliNoAccount')
@@ -114,6 +131,7 @@ const BotInfo = z.object({ bot: z.object({ open_id: z.string().regex(/^ou_[A-Za-
 export async function resolveFeishuBot(machine: Machine, feishu: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<FeishuBot | undefined> {
   const { cli: name } = FeishuBotSchema.parse(feishu ?? {})
   if (!name) return undefined
+  if (machine.wsl) throw new SetupError('feishuCliFailed', { output: 'Feishu CLI streaming is not supported by the WSL execution backend.' })
   const fail = (error: unknown): never => { throw error instanceof SetupError ? error : new SetupError('feishuCliFailed', { output: reason(error) }) }
   let cli = ''
   try { cli = executable(name, path, workerBin(machine.stateDir)) } catch (error) { fail(error) }

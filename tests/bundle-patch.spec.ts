@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
-import { ROUTER_PRESET, WORKER_PRESET } from '../src/app/sessions.ts'
+import { ROUTER_PRESET, WORKER_PRESET, WSL_ROUTER_PRESET, WSL_WORKER_PRESET } from '../src/app/sessions.ts'
 
 interface Row { id?: string; name: string; disabled?: unknown; config?: Record<string, unknown> & { plugins?: Row[] } | Row[] }
 /** The patch as DSH reads it: Cordis's include plugin parses `!!js` scalars, and applies the inserts to an entry list. */
@@ -26,10 +26,16 @@ const flat = (rows: readonly Row[]): Row[] => rows.flatMap(row => [row, ...Array
 const presetOf = (rows: readonly Row[], id: string) => rows.map(row => row.config as { id?: string; order?: number; plugins: Row[] })
   .find(config => config?.id === id)!
 
+it('keeps the raw library bootstrap and its sources inert until a configuration layer enables them', async () => {
+  const rows = await patched()
+  for (const id of ['dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-feishu']) {
+    expect(rows.find(row => row.id === id)?.disabled).toBe(true)
+  }
+})
 it('defines the worker preset Executor Sessions run under, with a shell that moves long commands to the background', async () => {
   const rows = await patched()
   expect(rows.map(row => row.id)).toEqual(['dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-feishu', 'dsh-superagent-worker-preset',
-    'dsh-superagent-router-preset'])
+    'dsh-superagent-router-preset', 'wsl-dsh-superagent-worker-preset', 'wsl-dsh-superagent-router-preset'])
   const preset = presetOf(rows, WORKER_PRESET)
   expect(preset.id).toBe(WORKER_PRESET)
   const plugins = flat(preset.plugins)
@@ -70,4 +76,24 @@ it('defines the router preset the main Session runs under: the worker\'s 5-secon
     '@deepseek-ai/dsh-tool-todo', '@deepseek-ai/dsh-tool-ask-user', '@deepseek-ai/dsh-tool-present', '@deepseek-ai/dsh-plan-mode',
     '@deepseek-ai/dsh-plugin-manager/tools', '@deepseek-ai/dsh-plugin-market/tools', '@deepseek-ai/dsh-tool-schedule', '@deepseek-ai/dsh-tool-goal',
     '@deepseek-ai/dsh-command-goal', '@deepseek-ai/dsh-tool-workflow', '@deepseek-ai/dsh-workflow-ptc']) expect(names, name).not.toContain(name)
+})
+
+it('keeps WSL tools in one isolated world, with standard names, 5-second jobs and a read-only router', async () => {
+  const rows = await patched()
+  for (const id of [WSL_WORKER_PRESET, WSL_ROUTER_PRESET]) {
+    // workspace's host generator excludes these IDs and its client leaves these selected sessions alone.
+    expect(id).toMatch(/^wsl-[a-z0-9-]+$/)
+    const preset = presetOf(rows, id)
+    const world = preset.plugins.find(row => row.id === 'wsl-world')!
+    expect(world).toMatchObject({ isolate: { shell: true, fs: true } })
+    const plugins = flat(preset.plugins)
+    expect(plugins.filter(row => row.name === '@deepseek-ai/dsh-tool-bash')).toHaveLength(1)
+    expect(plugins.some(row => row.name === '@deepseek-ai/dsh-tool-pwsh')).toBe(false)
+    expect(plugins.find(row => row.name === 'dsh-superagent/wsl-shell')?.config).toEqual({ timeoutMs: 5000, maxTimeoutMs: 5000 })
+    expect(plugins.find(row => row.name === '@deepseek-ai/dsh-tool-jobs')?.config).toEqual({ waitTimeoutMs: 5000, maxWaitTimeoutMs: 5000 })
+    expect(plugins.find(row => row.name === 'dsh-superagent/wsl-tools')?.config).toEqual({ search: id === WSL_WORKER_PRESET })
+    expect(plugins.some(row => row.name === '@deepseek-ai/dsh-tool-subagent')).toBe(false)
+    if (id === WSL_ROUTER_PRESET) expect(plugins.find(row => row.name === '@deepseek-ai/dsh-tool-fs')?.config)
+      .toEqual({ readImage: false, write: false, edit: false })
+  }
 })

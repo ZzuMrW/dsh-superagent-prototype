@@ -6,11 +6,13 @@ import { stopSubagents, untilQuiet } from '../src/executor/background.ts'
 import { jobRegistry } from './fixtures/host.ts'
 
 /** A context with DSH's job registry and subagents, and an idle worker agent with one live subagent, `child-1`. */
-function setup(waitForChildren: (agent: Agent) => Promise<boolean>, drainChildren: () => Promise<void> = async () => {}) {
+function setup(waitForTreeWork: (agent: Agent) => Promise<boolean>) {
   const jobs = jobRegistry()
   const agent = { id: 'worker-t1', status: 'idle', whenIdle: async () => {}, inbox: { nextTurn: [], nextStep: [] }, cancel: vi.fn() } as unknown as
     Agent & { status: string; cancel: ReturnType<typeof vi.fn> }
-  const subagents = { waitForChildren: vi.fn(waitForChildren), listChildren: async () => [{ id: 'child-1' }], drainChildren: vi.fn(drainChildren) }
+  const subagents = { waitForTreeWork: vi.fn(waitForTreeWork),
+    listDescendants: vi.fn(async (): Promise<({ kind: 'child'; id: string; activity: 'running' | 'inactive'; mode?: string } | { kind: 'diagnostic'; id: string; reason: string })[]> => [{ kind: 'child', id: 'child-1', activity: 'running' }]),
+    drainDescendants: vi.fn() }
   const services: Record<string, unknown> = { jobs: jobs.service, subagents }
   const ctx = { get: (name: string) => services[name], agents: { get: () => agent } } as unknown as Context
   return { ctx, agent, jobs, subagents }
@@ -59,19 +61,31 @@ it('joins a worker\'s subagents once for the looks that wait on them, as DSH can
     stop.abort()
     expect(await quiet).toBe(false)
   }
-  expect(subagents.waitForChildren).toHaveBeenCalledTimes(1)
+  expect(subagents.waitForTreeWork).toHaveBeenCalledTimes(1)
 })
 
-it('gives up a release of subagents that does not end within 10 seconds, and cancels the turn their ends woke', async () => {
-  const { ctx, agent } = setup(async () => false, () => new Promise(() => {}))
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-  try {
-    let stopped = false
-    const stopping = stopSubagents(ctx, agent).then(() => { stopped = true })
-    await vi.advanceTimersByTimeAsync(9_999)
-    expect(stopped).toBe(false)
-    await vi.advanceTimersByTimeAsync(1)
-    await stopping
-  } finally { vi.useRealTimers() }
-  expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: false })
+it('fails a temporary handoff closed rather than permanently closing a resident tree or pretending interrupt releases it', async () => {
+  const { ctx, agent, subagents } = setup(async () => false)
+  await expect(stopSubagents(ctx, agent, true)).rejects.toThrow('worker delegation is unsupported')
+  expect(subagents.listDescendants).toHaveBeenCalledWith(agent.id)
+  expect(subagents.drainDescendants).not.toHaveBeenCalled()
+  expect(agent.cancel).not.toHaveBeenCalled()
+})
+it('allows a stop when no descendant is resident, including an empty WSL worker catalog', async () => {
+  const { ctx, agent, subagents } = setup(async () => false)
+  subagents.listDescendants.mockResolvedValueOnce([])
+  await expect(stopSubagents(ctx, agent)).resolves.toBeUndefined()
+  subagents.listDescendants.mockResolvedValueOnce([{ kind: 'child', id: 'old-child', activity: 'inactive' }])
+  await expect(stopSubagents(ctx, agent)).resolves.toBeUndefined()
+  expect(subagents.drainDescendants).not.toHaveBeenCalled()
+})
+it('does not mistake a nonresident external run for a completed activation', async () => {
+  const { ctx, agent, subagents } = setup(async () => false)
+  subagents.listDescendants.mockResolvedValueOnce([{ kind: 'child', id: 'external-child', activity: 'inactive', mode: 'external' }])
+  await expect(stopSubagents(ctx, agent)).rejects.toThrow('worker delegation is unsupported')
+})
+it('does not mistake an unreadable descendant branch for a safe temporary stop', async () => {
+  const { ctx, agent, subagents } = setup(async () => false)
+  subagents.listDescendants.mockResolvedValueOnce([{ kind: 'diagnostic', id: 'unknown-child', reason: 'unavailable' }])
+  await expect(stopSubagents(ctx, agent)).rejects.toThrow('worker delegation is unsupported')
 })

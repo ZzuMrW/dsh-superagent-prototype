@@ -5,7 +5,8 @@
  */
 import { lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
-import { delimiter, join, resolve } from 'node:path'
+import { delimiter, join, resolve, posix } from 'node:path'
+import { executionStateDir, runWsl, type ExecutionMachine } from './wsl.ts'
 import type { SubprocessOutputReader, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { Deployment } from '../deployment.ts'
 import { SetupError } from '../setup.ts'
@@ -76,9 +77,12 @@ async function own(file: string, text: string, mode = 0o644): Promise<void> {
  * Atomically writes worker CLI shims and the isolated git configuration file into the state directory, refusing to overwrite foreign files.
  * Each shim strips the shim directory from PATH before exec so wrapper scripts resolving `gh` or `lark-cli` by name reach the real binary.
  */
-export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'repository' | 'github' | 'feishu'>, blockedCommands: readonly string[]): Promise<void> {
-  const { stateDir, repository, github, feishu } = deployment
+export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'repository' | 'github' | 'feishu' | 'wsl'>, blockedCommands: readonly string[]): Promise<void> {
+  const { github, feishu } = deployment
+  // WSL state is deliberately mapped to the Host state directory. Host writes are atomic; guest paths only appear inside scripts.
+  const stateDir = deployment.wsl ? join(deployment.stateDir, 'execution') : deployment.stateDir
   const dir = workerBin(stateDir)
+  const scriptDir = deployment.wsl ? posix.join(executionStateDir(deployment), 'worker-bin') : dir
   await mkdir(dir, { recursive: true })
   const before = await readdir(dir)
   for (const name of before) { const file = join(dir, name); if (!await written(file)) throw new SetupError('foreignFile', { file }) }
@@ -91,7 +95,7 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
     kept.add(name)
   }
   const withoutShims = [
-    `self=${shellQuote(dir)}`, 'rest=', 'IFS=:', 'set -f',
+    `self=${shellQuote(scriptDir)}`, 'rest=', 'IFS=:', 'set -f',
     'for entry in $PATH; do [ "$entry" = "$self" ] || rest="${rest:+$rest:}$entry"; done',
     'set +f', 'unset IFS', 'PATH=$rest', 'export PATH',
   ].join('\n')
@@ -113,6 +117,17 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
     // Include Git LFS filters because the operator's global gitconfig (which usually holds them) is ignored.
     '[filter "lfs"]', '\tclean = git-lfs clean -- %f', '\tsmudge = git-lfs smudge -- %f', '\tprocess = git-lfs filter-process', '\trequired = true',
   ].join('\n') + '\n')
+  if (deployment.wsl) await runWsl(deployment, { argv: ['python3', '-c', 'import os,sys\nfor n in os.listdir(sys.argv[1]): os.chmod(os.path.join(sys.argv[1],n),0o755)', scriptDir], cwd: '/', signal: AbortSignal.timeout(60_000) })
+}
+
+/** Per-execution guest environment; never applied to the Windows Host process. Undefined means explicitly unset. */
+export async function workerEnvironment(machine: ExecutionMachine): Promise<Record<string, string | undefined>> {
+  if (!machine.wsl) return { ...agentVariables(machine.stateDir), PATH: [workerBin(machine.stateDir), process.env.PATH ?? ''].join(delimiter) }
+  const stateDir = executionStateDir(machine)
+  const bin = posix.join(stateDir, 'worker-bin')
+  const path = (await runWsl(machine, { argv: ['python3', '-c', 'import os; print(os.environ.get("PATH", ""))'], cwd: '/', signal: AbortSignal.timeout(60_000) })).trim()
+  return { ...agentVariables(stateDir), GIT_CONFIG_GLOBAL: posix.join(stateDir, 'worker-gitconfig'),
+    GH_PROMPT_DISABLED: '1', PATH: [bin, ...path.split(':').filter(entry => entry !== bin)].join(':') }
 }
 
 /** Applies environment overrides and prepends worker shims to `process.env.PATH`, returning a restore callback. */
@@ -135,22 +150,31 @@ export async function runAsWorker(subprocess: SubprocessRuntime, argv: string[],
 }
 
 /** Verifies that worker git invocations resolve the deployment's GitHub credential helper. */
-export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 'stateDir'>, subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
-  const { github, stateDir } = deployment
+export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 'stateDir' | 'wsl'>, subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
+  const { github } = deployment
+  const stateDir = executionStateDir(deployment)
   // `-z` separates fields with NUL and never quotes paths.
-  const helpers = (await runAsWorker(subprocess, ['git', 'config', '-z', '--show-origin', '--get-all', 'credential.https://github.com.helper'], stateDir, AbortSignal.any([signal, AbortSignal.timeout(60_000)])).catch(() => '')).split('\0')
-  if (helpers.join('\0') !== [`file:${workerGitConfig(stateDir)}`, credentialHelper(github.cli), ''].join('\0')) throw new SetupError('gitTooOld')
+  const argv = ['git', 'config', '-z', '--show-origin', '--get-all', 'credential.https://github.com.helper']
+  const output = deployment.wsl ? runWsl(deployment, { argv, cwd: stateDir, signal, env: await workerEnvironment(deployment), timeoutMs: 60_000 })
+    : runAsWorker(subprocess, argv, stateDir, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))
+  const helpers = (await output.catch(() => '')).split('\0')
+  const config = deployment.wsl ? posix.join(stateDir, 'worker-gitconfig') : workerGitConfig(stateDir)
+  if (helpers.join('\0') !== [`file:${config}`, credentialHelper(github.cli), ''].join('\0')) throw new SetupError('gitTooOld')
 }
 
 /**
  * Verifies that a ticket directory's local or worktree git config defines no custom `credential.*` or `http.*extraheader`
  * keys, which the agent's git would read from the repository's own config and act on.
  */
-export async function verifyDirectory(directory: string, subprocess: SubprocessRuntime, signal: AbortSignal): Promise<void> {
+export async function verifyDirectory(directory: string, subprocess: SubprocessRuntime, signal: AbortSignal, machine?: ExecutionMachine): Promise<void> {
   const keys = ['git', 'config', '-z', '--show-scope', '--get-regexp', '^(credential\\..*|http\\..*extraheader)$']
   // `git config --get-regexp` exits with code 1 when no keys match.
-  const output = await runAsWorker(subprocess, keys, directory, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))
-    .catch((error: unknown) => { if (error instanceof CliError && error.exitCode === 1) return ''; throw error })
+  const run = machine?.wsl ? runWsl(machine, { argv: keys, cwd: directory, env: await workerEnvironment(machine), signal, timeoutMs: 60_000 })
+    : runAsWorker(subprocess, keys, directory, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))
+  const output = await run.catch((error: unknown) => {
+    if (error instanceof CliError && error.exitCode === 1 || machine?.wsl && (error as { code?: unknown })?.code === 1) return ''
+    throw error
+  })
   const scoped = output.split('\0')
   const local = scoped.flatMap((scope, index) => index % 2 === 0 && (scope === 'local' || scope === 'worktree') ? [scoped[index + 1]!.split('\n')[0]!] : [])
   if (local.length) throw new Error(`The git configuration of the repository in ${directory} sets ${local.join(', ')}, which the agent's git would also read; remove them.`)

@@ -88,8 +88,8 @@ export function jobRegistry(owner: (sessionId: string) => FakeAgent | undefined 
 /**
  * DSH's subagents as the Executor uses them. `spawn` starts a child of a Session, an agent while it lives, which a drain of
  * the Session's descendants refuses from then on; `settle` ends one, whose end wakes its idle parent or steers a running one
- * before a wait for the parent's children returns. Releasing or interrupting a child settles it; a drain of descendants
- * injects their ends. The catalog lists every child a Session had.
+ * before a waitForTreeWork join returns. Only final drainDescendants closes admission and injects their ends.
+ * The current listDescendants catalog retains inactive children; there is no id-based temporary release API.
  */
 export function subagentRuntime(agents: Map<string, FakeAgent>) {
   const children = new Map<string, { parent: string; live: boolean; settled: PromiseWithResolvers<void> }>()
@@ -106,13 +106,13 @@ export function subagentRuntime(agents: Map<string, FakeAgent>) {
     child.settled.resolve()
   }
   const service = {
-    waitForChildren: vi.fn(async (parent: { id: string }) => {
+    waitForTreeWork: vi.fn(async (parent: { id: string }) => {
       const live = [...children.values()].filter(child => child.parent === parent.id && child.live)
       await Promise.all(live.map(child => child.settled.promise))
       return live.length > 0
     }),
-    listChildren: vi.fn(async (id: string) => [...children].filter(([, child]) => child.parent === id).map(([childId]) => ({ id: childId }))),
-    drainChildren: vi.fn(async (_parent: { id: string }, ids: readonly string[]) => { for (const id of ids) settle(id) }),
+    listDescendants: vi.fn(async (id: string) => [...children].filter(([, child]) => child.parent === id).map(([childId, child]) =>
+      ({ kind: 'child' as const, id: childId, activity: child.live ? 'running' as const : 'inactive' as const, mode: 'continuable' as const, parentId: id, depth: 1 }))),
     drainDescendants: vi.fn(async (parents: readonly { id: string }[]) => {
       for (const parent of parents) {
         closed.add(parent.id)
@@ -239,7 +239,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const jobs = jobRegistry(id => agents.get(id))
   const subagents = subagentRuntime(agents)
   const services = { agents, llm: { resolveCallConfig: vi.fn(async (value: unknown) => value) }, sessionController: controller,
-    sessionPersistence: persistence, workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) }, permissionPresets: { set: () => {} }, subprocess, webServer,
+    sessionPersistence: persistence, sessionQuery: { readSession: controller.inspect }, workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) }, permissionPresets: { set: () => {} }, subprocess, webServer,
     jobs: jobs.service, subagents: subagents.service }
   const ctx = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)

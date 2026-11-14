@@ -298,6 +298,13 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/limits.ts` | The limits of the values a person sets, which the settings schemas check and the panel's fields offer |
 | `src/kv.ts` | `KV`: every family of `kv` records with its key, its value's type and its owner, and the `Key` and `Family` types the Store and `SourceContext.state` take |
 | `src/navigation.ts` | Opens a DeepSeek Harness Session from the panel once the host's catalog lists it |
+| `src/wsl-shell.ts` | The public WSL shell executor with per-Session Superagent guest environment and distribution/user bindings |
+| `src/wsl-fs.ts` | Re-exports the public workspace filesystem provider for the isolated WSL world |
+| `src/wsl-tools.ts` | Loads the pinned workspace image and optional search providers without applying its host plugin or changing the profile |
+| `src/wsl-workspace.d.ts` | Ambient declarations for the public workspace shell and filesystem seams consumed by the adapter |
+| `src/app/wsl-world.ts` | Per-Session WSL execution bindings, quoted guest environment commands, and Windows workspace coordinates |
+| `src/infra/wsl.ts` | Windows-to-WSL argv transport, guest path mapping, executable and filesystem probes, and guest-owned timeout and cancellation |
+| `src/infra/wsl-shell-transport.ts` | Guest-monitored standard Bash processes with invocation-local cancellation and descendant cleanup, without changing foreground promotion or output observation |
 | `src/core/model.ts` | The domain types, among them the typed Ticket and `MandateBasis`, with `threadKey`, `ticketOutcome`, `reached`, `followupOwners`, `settled`, `waitsForPerson`, `liveTicket`, `runningAssignment`, `latestAssignment` and `latestReport` |
 | `src/core/ports.ts` | The ports: `Repositories`, `Policy`, `SourceScope`, `Assessor`, `Executor`, `Outbox`, and the domain events |
 | `src/core/engine.ts` | The Engine, the core's entry point, and the role interfaces `EngineForSources`, `EngineForMainSession`, `EngineForPeople`, `EngineForSettings` and `EngineForExecutor` |
@@ -413,6 +420,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
 | `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
+| `tests/executor-stop-barrier.spec.ts` | Failed background stops remain launch/delivery barriers until a fresh successful stop, and exact-root descendant draining is reserved for shutdown |
+| `tests/wsl-backend.spec.ts` | Host/guest path separation, explicit distribution/user transport, CLI authentication failures, and the guest runner's environment, timeout and cancellation protocol |
+| `tests/wsl-shell.spec.ts` | The public shell seam receives Session-bound guest environment and WSL identity, preserves request semantics, and refuses unbound Sessions |
+| `tests/wsl-shell-cancel.spec.ts` | Real subprocess integration for Bash handle kill, deadline/abort, detached descendants, stdin/output and cancellation races |
+| `tests/wsl-world.spec.ts` | WSL workspace coordinates, per-Session binding isolation and disposal, refreshed ticket variables, and literal guest environment quoting |
+| `tests/wsl-user.spec.ts` | Default-user identity preflight accepts one identity, refuses mismatches and failed probes, and leaves native deployments untouched |
 | `tests/bundle-patch.spec.ts` | The bundle's patch, read as DeepSeek Harness reads it, and the agent preset of Executor Sessions it defines |
 | `tests/effects.spec.ts` | The effect queue: coalescing, limits, retries with backoff, health and shutdown |
 | `tests/passes.spec.ts` | Passes: one at a time, the ones asked for during a pass run as one after it, and the runtime health a failed pass reports |

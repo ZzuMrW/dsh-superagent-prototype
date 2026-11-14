@@ -2,7 +2,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
 import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
-import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
+import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment, workerEnvironment } from '../infra/environment.ts'
+import { runWsl, assertDefaultWslUser } from '../infra/wsl.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 
@@ -30,12 +31,16 @@ export class Setup {
   /** Environment variables pointing agent subprocesses at the isolated git config and command shims. */
   private readonly variables: Record<string, string | undefined>
   private restoreEnvironment?: () => void
+  private readonly guestEnvironment: Record<string, string | undefined> = {}
+  get executionBinding(): { machine: Machine; env: Record<string, string | undefined> } | undefined {
+    return this.host.machine.wsl && this.configured() ? { machine: this.host.machine, env: this.guestEnvironment } : undefined
+  }
   constructor(private readonly host: SetupHost) {
     this.path = withoutDirectory(process.env.PATH ?? '', workerBin(host.machine.stateDir))
     this.variables = agentVariables(host.machine.stateDir)
   }
   /** Host command environment with agent git variables applied and the worker shim directory excluded from PATH. */
-  get commandEnvironment(): Record<string, string | undefined> { return { ...this.variables, PATH: this.path } }
+  get commandEnvironment(): Record<string, string | undefined> { return this.host.machine.wsl ? this.guestEnvironment : { ...this.variables, PATH: this.path } }
   get deployment(): Deployment {
     if (!this.resolved) throw new Error(`dsh-superagent is waiting for setup: ${this.problem?.detail ?? 'setup has not run'}`)
     return this.resolved
@@ -71,6 +76,8 @@ export class Setup {
   /** Probes CLIs the way worker shells run them, using `stateDir` as `cwd` since it exists even before the repository clone is valid. */
   private probe() {
     const { context, machine, lifetime } = this.host
+    if (machine.wsl) return (argv: string[]) => runWsl(machine, { argv, cwd: '/', signal: lifetime, timeoutMs: 60_000,
+      env: { GH_TOKEN: undefined, GITHUB_TOKEN: undefined, GH_PROMPT_DISABLED: '1' } })
     return workerProbe(context.subprocess, machine.stateDir, machine.stateDir, lifetime)
   }
   private async resolve(settings: Settings): Promise<Deployment> {
@@ -88,8 +95,10 @@ export class Setup {
       if (error instanceof SetupError) throw error
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })
     }
+    await assertDefaultWslUser(machine).catch(machineProblem)
     await writeEnvironment(resolved, settings.executor.blockedCommands).catch(machineProblem)
-    this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
+    if (machine.wsl) Object.assign(this.guestEnvironment, await workerEnvironment(machine).catch(machineProblem))
+    else this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
     await verifyEnvironment(resolved, context.subprocess, lifetime).catch((error: unknown) => {
       this.restore()
       machineProblem(error)

@@ -2,4 +2,11 @@ node_modules/
 lib/
 .artifacts/
 .env
+.env.*
+!.env.example
 coverage/
+
+# Local editor recovery files can contain unsanitized drafts.
+*.swp
+*.swo
+*~

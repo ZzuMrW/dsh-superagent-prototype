@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Superagent",
-    "description": "Watch one GitHub repository, turn authorized requests into Tickets, and execute each in its own DSH Session."
+    "title": "Superagent WSL local adapter",
+    "description": "Local experimental adaptation of the upstream research prototype: manage GitHub tickets on a Windows Host and run commands and workspaces in a selected WSL distribution. Requires an account and allowed list; Feishu is not enabled. Targets DSH 0.2.2-rc.3 and WSL workspace 0.7.13; see the bundled WSL-ADAPTER document for verification limits."
   }
 }

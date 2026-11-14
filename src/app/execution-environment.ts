@@ -1,7 +1,7 @@
 /** Execution environment variables exposed to prepare commands and documented in worker Session instructions; never contains credentials. */
 import { join } from 'node:path'
 import type { Ticket, Trigger } from '../core/index.ts'
-import type { Deployment } from '../deployment.ts'
+import type { Deployment, Machine } from '../deployment.ts'
 import type { Settings } from '../policy.ts'
 import type { Localized, VariableSpec } from '../sources/kind.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
@@ -15,7 +15,9 @@ export const EXECUTOR_VARIABLES: readonly (VariableSpec & { ticket?: true })[] =
 ]
 export interface Variable { key: string; value: string; description: Localized; owner: string }
 
-export const executionRoot = (settings: Settings, stateDir: string): string => settings.executor.directory || join(stateDir, 'work')
+/** One root resolver for settings hints and actual ticket metadata. */
+export const executionRoot = (settings: Settings, stateDir: string, wsl?: Machine['wsl']): string =>
+  settings.executor.directory || (wsl ? wsl.workRoot : join(stateDir, 'work'))
 
 /** Lists all declared variables grouped by owner; `enabled` is false for Sources that are currently switched off. */
 export function declaredVariables(sources: SourceRegistry, settings?: Settings): { owner: string; enabled: boolean; variables: readonly VariableSpec[] }[] {

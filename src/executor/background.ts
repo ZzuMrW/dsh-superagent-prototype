@@ -1,6 +1,7 @@
 /**
  * A worker's background work in DSH: the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`). They
- * keep the worker busy after its turn ended, and they stop with its Assignment. A profile without either service has none.
+ * keep the worker busy after its turn ended. Shell jobs stop with the Assignment; resident subagent trees require
+ * activation-aware teardown which this single-worker adapter does not support. A profile without either service has none.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -13,16 +14,16 @@ interface Jobs {
   kill(id: string, caller: string, reason?: string): unknown
   readonly events: { subscribe(filter: { owner: string }, listener: (event: { type: string }) => void): () => void }
 }
-/** What the Executor uses of DSH's subagents: joining a worker's subagents that work, its subagents, and releasing them. */
+/** Current DSH tree joins and catalog discovery. A catalog's running activity means resident, not busy. */
 interface Subagents {
-  waitForChildren(parent: Agent): Promise<boolean>
-  listChildren(parentSessionId: string): Promise<readonly { id: string }[]>
-  drainChildren(parent: Agent, childIds: readonly string[]): Promise<void>
+  waitForTreeWork(root: Agent): Promise<boolean>
+  listDescendants(rootSessionId: SessionId): Promise<readonly (
+    { kind: 'child'; id: SessionId; activity: 'running' | 'inactive'; mode?: string }
+    | { kind: 'diagnostic'; id: SessionId; reason: string }
+  )[]>
 }
 /** How long a stop waits for a killed job to end, collecting its end so the worker is not woken to hear of it. */
 const KILL_WAIT_MS = 10_000
-/** How long a release of subagents may take; it can hold up a shutdown, so DSH's own callers bound it too. */
-const DRAIN_LIMIT_MS = 10_000
 /** How long one wait that collects a job's end runs; one that ends with the job running is followed by the next. */
 const COLLECT_WAIT_MS = 10 * 60_000
 
@@ -49,7 +50,7 @@ const joins = new WeakMap<Agent, Promise<boolean>>()
 function childrenEnd(subagents: Subagents, agent: Agent): Promise<boolean> {
   let join = joins.get(agent)
   if (!join) {
-    join = subagents.waitForChildren(agent).finally(() => { joins.delete(agent) })
+    join = subagents.waitForTreeWork(agent).finally(() => { joins.delete(agent) })
     joins.set(agent, join)
   }
   return join
@@ -134,27 +135,24 @@ export async function collectJob(ctx: Context, sessionId: string, job: { id: str
 }
 
 /**
- * Release the worker's live subagents, for a bounded time. DSH delivers each one's end to the worker before the release
- * returns, which wakes it, so the worker's turn is cancelled after, keeping its inbox when `keepInbox`, and the stop ends
- * with that turn. Its Session still admits subagents.
+ * Verify a temporary worker stop has no resident descendants. DSH 0.2.2 removed id-based release; its
+ * drainDescendants permanently closes the root's admission and is only valid during final tree teardown.
+ * Without the original activation handles we cannot preserve temporary handoff/resume semantics. Fail closed
+ * rather than leave descendants running or pretend interrupt is release. The WSL worker preset disables delegation.
  */
-export async function stopSubagents(ctx: Context, agent: Agent, keepInbox = false): Promise<void> {
+export async function stopSubagents(ctx: Context, agent: Agent, _keepInbox = false): Promise<void> {
   const subagents = subagentsOf(ctx)
   if (!subagents) return
-  // The catalog lists every subagent the Session had; one that ended has no agent.
-  const live = (await subagents.listChildren(agent.id)).map(child => child.id).filter(id => ctx.agents.get(id as SessionId))
-  if (!live.length) return
-  try { await until(subagents.drainChildren(agent, live), undefined, DRAIN_LIMIT_MS) }
-  finally {
-    if (agent.status !== 'idle') cancelled.add(agent)
-    agent.cancel({ kind: 'user' }, { keepInbox })
-    await until(agent.whenIdle(), undefined, DRAIN_LIMIT_MS)
+  const descendants = await subagents.listDescendants(agent.id)
+  // External runs have no resident Session: catalog inactivity does not prove that their execution ended.
+  if (descendants.some(child => child.kind === 'diagnostic' || child.activity === 'running' || child.mode === 'external')) {
+    throw new Error('DSH 0.2.2 cannot temporarily release resident subagents without their activation handles; worker delegation is unsupported in this adapter. Final tree teardown must use drainDescendants.')
   }
 }
 
 /**
- * Stop what a worker runs in the background once its Assignment ends: kill its shell jobs and release its subagents (see
- * `stopSubagents`). A Session not loaded has no subagent at work. One failure stops nothing else.
+ * Stop a worker's shell jobs and verify no unsupported resident subagents remain (see `stopSubagents`).
+ * A Session not loaded has no subagent at work. One failure stops nothing else.
  */
 export async function stopBackground(ctx: Context, sessionId: string, reason: string, keepInbox = false): Promise<void> {
   const failures: unknown[] = []

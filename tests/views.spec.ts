@@ -12,6 +12,7 @@ import { basisFacts, ticketDetail } from '../src/app/views/tickets.ts'
 import { threadDetail } from '../src/app/views/threads.ts'
 import { droppedReplies, sourcesStatus } from '../src/app/views/sources.ts'
 import { overview } from '../src/app/views/overview.ts'
+import { settingsView } from '../src/app/views/settings.ts'
 import { markdown, plain } from '../src/app/views/text.ts'
 import { policyHistory } from '../src/app/settings-history.ts'
 import { KV } from '../src/kv.ts'
@@ -57,6 +58,15 @@ function views() {
   sources.register(feishuKind); sources.register(githubKind)
   return { store, sources, links }
 }
+it('shows the same default guest work root used by WSL tickets and keeps explicit overrides', () => {
+  const { sources } = views()
+  const wsl = { distro: 'ExampleDistro', user: 'example-user', workRoot: '/home/example-user/worktrees' }
+  expect(settingsView(store, sources, {}, {}, 'C:/state', wsl).environment.root).toBe(wsl.workRoot)
+  expect(settingsView(store, sources, {}, {}, directory).environment.root).toBe(join(directory, 'work'))
+  const settings = store.settings()
+  store.saveSettings({ ...settings, executor: { ...settings.executor, directory: '/srv/ticket-worktrees' } })
+  expect(settingsView(store, sources, {}, {}, 'C:/state', wsl).environment.root).toBe('/srv/ticket-worktrees')
+})
 const at = new Date().toISOString()
 /** A live ticket with no Assignment, as a follow-up's owner needs one. */
 const live = (id: string) => store.tickets.save({ id, title: id, decisionId: 'd', channels: [], undelivered: [], createdAt: at,

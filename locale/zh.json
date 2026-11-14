@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Superagent",
-    "description": "监听单个 GitHub 仓库，把获授权的请求转为 Ticket，并在各自的 DSH 会话中执行。"
+    "title": "Superagent · WSL 本地适配",
+    "description": "上游研究原型的本地实验适配版：Windows 宿主管理 GitHub 工单，命令与工作区转接到指定 WSL。须配置专用账号和白名单；不启用飞书。仅针对 DSH 0.2.2-rc.3 与 WSL 工作区插件 0.7.13，实际验证范围见随包 WSL-ADAPTER 说明。"
   }
 }

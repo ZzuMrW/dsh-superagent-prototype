@@ -1,7 +1,7 @@
 /** Resolves and seeds per-role default models on newly created sessions without mutating the global DSH default. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm/brand'
 import type { RoleModel } from '../policy.ts'
 
 /** Resolve a configured route through the live provider; catalog membership is not a restriction. */
@@ -16,29 +16,8 @@ export async function initializeRoleModel(ctx: Context, agent: Agent, model: Rol
   if (!model) return
   if (agent.session.requestHeader() || agent.session.snapshotEvents().some(event => event.type === 'model/selection')) return
   const selected = await resolveRoleModel(ctx, model)
-  // Avoid selectModel because it mutates the global DSH default; inject the selection for the initial request only.
-  agent.session.append('model/selection', selected)
-  let initial = true
-  let assembled: ModelSelection | undefined
-  agent.ctx.effect(() => {
-    const disposers = [
-      agent.ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
-        const selection = initial ? selected : undefined
-        const result = await next()
-        assembled = selection
-        return selection ? { ...result, variables: { ...result.variables, provider: selection.provider, model: selection.model } } : result
-      }, { prepend: true }),
-      agent.ctx.on('agent/request', async (_payload, next) => {
-        const result = await next()
-        if (!assembled) return result
-        const { reasoningEffort: _inherited, ...rest } = result
-        return { ...rest, ...assembled }
-      }, { prepend: true }),
-      ctx.on('session/event', (session, event) => {
-        if (session === agent.session && (event.type === 'request/header' || event.type === 'model/selection')) initial = false
-      }),
-    ]
-    return () => disposers.forEach(dispose => dispose())
-  })
+  // Agent-owned selection is durable and captured before step admission; unlike the Session Controller's
+  // selectModel operation it does not mutate the Host default. agent/request can no longer change the route.
+  agent.model.select(selected)
   await ctx.sessionPersistence.flush()
 }

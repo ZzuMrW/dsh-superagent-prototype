@@ -4,6 +4,7 @@ import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import type { Deployment } from '../deployment.ts'
+import { runWsl, guestPath } from './wsl.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -67,6 +68,8 @@ export class Commands {
   withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
   async run(program: string, args: string[], cwd?: string): Promise<string> {
     try {
+      if (this.deployment.wsl) return await runWsl(this.deployment, { argv: [program, ...args], cwd: cwd ? guestPath(this.deployment, cwd) : '/',
+        env: { ...this.environment, GH_PROMPT_DISABLED: '1' }, signal: this.signal, timeoutMs: TIMEOUT_MS })
       const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
         env: { ...process.env, ...this.environment, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
       return stdout

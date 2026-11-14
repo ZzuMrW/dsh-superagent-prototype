@@ -6,11 +6,12 @@ import { describe, expect, it } from 'vitest'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const NUMBERED = /^(\d{3})-[a-z0-9-]+\.md$/
 const numbered = readdirSync(join(ROOT, 'docs')).filter(name => NUMBERED.test(name)).sort()
-const entries = ['README.md', 'SETUP.md']
+const entries = ['README.md', 'SETUP.md', 'WSL-ADAPTER.md']
 const documents = [...entries, ...readdirSync(join(ROOT, 'docs')).filter(name => name.endsWith('.md')).map(name => `docs/${name}`)]
 const read = (path: string): string => readFileSync(join(ROOT, path), 'utf8')
 function links(file: string): string[] {
-  return [...readFileSync(file, 'utf8').matchAll(/\]\(([^)\s]+)\)/g)].map(match => match[1]!.split('#')[0]!).filter(target => target && !/^[a-z]+:/.test(target))
+  return [...readFileSync(file, 'utf8').matchAll(/\]\((?:<([^>]+)>|([^)\s]+))\)/g)]
+    .map(match => (match[1] ?? match[2])!.split('#')[0]!).filter(target => target && !/^[a-z]+:/.test(target))
 }
 const files = (directory: string): string[] => readdirSync(join(ROOT, directory), { recursive: true, withFileTypes: true })
   .filter(entry => entry.isFile()).map(entry => relative(ROOT, join(entry.parentPath, entry.name)))

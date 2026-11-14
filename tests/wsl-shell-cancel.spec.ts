@@ -8,17 +8,34 @@ import { SHELL_CANCEL, SHELL_CLEANUP, SHELL_MONITOR } from '../src/infra/wsl-she
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import { registerWslExecution } from '../src/app/wsl-world.ts'
 import type { Machine } from '../src/deployment.ts'
-import type { ShellExecSpec } from '@deepseek-ai/dsh-shell'
+import type { ShellExecSpec, ShellExecution } from '@deepseek-ai/dsh-shell'
+import { environmentSnapshot, freezeExecutionSnapshot, freezeTarget } from '../src/execution/target.ts'
 const linuxIt = it.skipIf(process.platform !== 'linux')
 
 const contexts: Context[] = []
-afterEach(async () => { for (const ctx of contexts.splice(0)) await ctx.fiber.dispose() })
+const unbind: (() => void)[] = []
+let serial = 0
+function bind(sessionId: string) {
+  const target = freezeTarget({ distro: 'test', user: 'root', uid: process.getuid!(), home: '/root',
+    bootId: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() },
+    { input: '/tmp', guestPath: '/tmp', hostPath: '\\\\wsl.localhost\\test\\tmp', storage: 'guest-local',
+      evidence: { converter: 'wslpath', hostRegistration: 'verified' } }, 'test-generation', new Date().toISOString())
+  const binding = { machine: { wsl: { distro: 'test', user: 'root' } } as Machine, env: {}, guestCwd: '/tmp',
+    snapshot: freezeExecutionSnapshot(1, target, environmentSnapshot({})) }
+  const dispose = registerWslExecution(sessionId, binding)
+  unbind.push(dispose)
+  return dispose
+}
+afterEach(async () => {
+  for (const ctx of contexts.splice(0)) await ctx.fiber.dispose()
+  for (const dispose of unbind.splice(0)) dispose()
+})
 async function setup(failCleanup = false, faults: { cancelFailure?: boolean; frozenGuest?: boolean; detachedGuest?: boolean } = {}) {
   const guestHandles: SubprocessHandle[] = []
   const ctx = new Context()
   contexts.push(ctx)
   new LocalSubprocessRuntime(ctx)
-  // Keep every vendor implementation method, including spawnExecution and deadline; just emulate wsl.exe -e on Linux.
+  // Real public subprocess service and production framed Python; translate only wsl.exe -e.
   const runtime = ctx.subprocess
   const spawn = runtime.spawn.bind(runtime)
   runtime.spawn = spec => {
@@ -32,8 +49,8 @@ async function setup(failCleanup = false, faults: { cancelFailure?: boolean; fro
       // SIGSTOP is fault injection only; the monitor and user command are the production Python protocol.
       let frozen = SHELL_MONITOR.replace('child=None', "with open(root+'/monitor-test-pid','w') as f: f.write(str(os.getpid()))\nchild=None")
       if (faults.frozenGuest) frozen = frozen.replace('  while not exited():', '  os.kill(os.getpid(),signal.SIGSTOP)\n  while not exited():')
-      guestHandles.push(spawn({ ...spec, argv: ['python3', '-c', frozen, argv[3]!], cwd: '/tmp' }))
-      const id = JSON.parse(Buffer.from(argv[3]!, 'base64').toString()).id as string
+      guestHandles.push(spawn({ ...spec, argv: ['python3', '-c', frozen, ...argv.slice(3)], cwd: '/tmp' }))
+      const id = JSON.parse((spec.stdio.stdin as { data: string }).data).id as string
       const bridge = `import os,time,sys\nroot='/tmp/dsh-shell-'+sys.argv[1]\nend=time.monotonic()+3\nwhile not os.path.exists(root+'/pid') and time.monotonic()<end: time.sleep(.01)\ntime.sleep(.05)\nwith open(root+'/monitor-test-pid') as f: monitor=f.read()\nprint('READY '+monitor+' '+sys.argv[1],flush=True)\n${faults.frozenGuest ? 'sys.exit(9)' : 'time.sleep(60)'}`
       argv = ['python3', '-c', bridge, id]
     }
@@ -43,13 +60,19 @@ async function setup(failCleanup = false, faults: { cancelFailure?: boolean; fro
     }
     return spawn({ ...spec, argv, cwd: '/tmp' })
   }
+  const sessionId = `shell-cancel-${++serial}`
+  bind(sessionId)
   const shell = new SuperagentWslShell(ctx, { timeoutMs: 120000, maxTimeoutMs: 600000,
-    maxOutputBytes: 64000, maxSpillBytes: 67108864, graceMs: 100, loginShell: false, distro: 'test', wslPath: 'wsl.exe' })
-  const spec = (command: string, extra: Partial<ShellExecSpec> = {}): ShellExecSpec => ({ command, workdir: '/tmp',
-    timeoutMs: 5000, onExpiry: 'none', stdoutMaxBytes: 64000, sandboxPolicy: undefined, ...extra })
+    maxOutputBytes: 64000, maxSpillBytes: 67108864, graceMs: 100, wslPath: 'wsl.exe' })
+  const spec = (command: string, extra: Partial<ShellExecSpec> = {}): ShellExecSpec => {
+    const id = extra.dshEnv?.DSH_SESSION_ID ?? sessionId
+    if (id !== sessionId) bind(id)
+    return { command, workdir: '/tmp', timeoutMs: 5000, onExpiry: 'none', stdoutMaxBytes: 64000,
+      sandboxPolicy: undefined, dshEnv: { DSH_SESSION_ID: id }, ...extra }
+  }
   return { shell, spec, runtime, guestHandles }
 }
-async function ready(execution: ReturnType<SuperagentWslShell['start']>) {
+async function ready(execution: ShellExecution) {
   await expect.poll(() => execution.observed.stdout.readFrom(0).text, { timeout: 5000 }).toContain('READY')
   const text = execution.observed.stdout.readFrom(0).text
   const [_, child, nonce] = /READY (\d+) ([\w-]+)/.exec(text)!
@@ -73,10 +96,10 @@ linuxIt('standard ShellExecution.kill cancels the guest group, reaps descendants
   expect(execution.kill()).toBe(false)
 }, 10000)
 
-linuxIt.each(['timeout', 'abort', 'abort-none'] as const)('vendor %s signal cancels guest before transport completion', async cause => {
+linuxIt.each(['timeout', 'abort', 'abort-none'] as const)('public executor %s signal cancels guest before transport completion', async cause => {
   const { shell, spec } = await setup()
   const abort = new AbortController()
-  const execution = shell.start(spec(command, { onExpiry: cause === 'abort-none' ? 'none' : 'kill', timeoutMs: cause === 'timeout' ? 1000 : 5000, signal: abort.signal }))
+  const execution = await shell.execute(spec(command, { onExpiry: cause === 'abort-none' ? 'none' : 'kill', timeoutMs: cause === 'timeout' ? 1000 : 5000, signal: abort.signal }))
   const { child, nonce } = await ready(execution)
   if (cause !== 'timeout') abort.abort()
   const result = await execution.result()
@@ -89,7 +112,7 @@ linuxIt.each(['timeout', 'abort', 'abort-none'] as const)('vendor %s signal canc
 
 linuxIt.each(['sleep 60', 'setsid sleep 60'])('normal completion reaps background descendants (%s) before done', async background => {
   const { shell, spec } = await setup()
-  const execution = shell.start(spec(`${background} & echo "READY $! $DSH_SHELL_NONCE"; sleep .1`))
+  const execution = await shell.execute(spec(`${background} & echo "READY $! $DSH_SHELL_NONCE"; sleep .1`))
   const { child, nonce } = await ready(execution)
   await execution.done
   expect((await execution.result()).exitCode).toBe(0)
@@ -99,8 +122,8 @@ linuxIt.each(['sleep 60', 'setsid sleep 60'])('normal completion reaps backgroun
 
 linuxIt('nonce cancellation never touches a concurrent guest invocation', async () => {
   const { shell, spec } = await setup()
-  const first = shell.start(spec(command))
-  const second = shell.start(spec(command))
+  const first = await shell.execute(spec(command))
+  const second = await shell.execute(spec(command))
   try {
     const a = await ready(first)
     const b = await ready(second)
@@ -122,8 +145,8 @@ linuxIt('nonce cancellation never touches a concurrent guest invocation', async 
 linuxIt('background cleanup failure is observable and blocks subsequent Session work until explicit recovery', async () => {
   const { shell, spec, runtime } = await setup(true)
   const sessionId = 'cleanup-failure-test'
-  const dispose = registerWslExecution(sessionId, { machine: { wsl: { distro: 'test', user: 'root' } } as Machine, env: {} })
-  const execution = shell.start(spec('echo "READY $$ $DSH_SHELL_NONCE"; sleep .1', { dshEnv: { DSH_SESSION_ID: sessionId } }))
+  const dispose = bind(sessionId)
+  const execution = await shell.execute(spec('echo "READY $$ $DSH_SHELL_NONCE"; sleep .1', { dshEnv: { DSH_SESSION_ID: sessionId } }))
   const { nonce } = await ready(execution)
   try {
     // A background consumer need never call result().
@@ -155,7 +178,7 @@ linuxIt('background cleanup failure is observable and blocks subsequent Session 
 linuxIt('failed cancel control falls back to bounded transport termination without clearing sticky failure', async () => {
   const { shell, spec, guestHandles } = await setup(false, { cancelFailure: true, detachedGuest: true })
   const sessionId = 'cancel-control-failure'
-  const execution = shell.start(spec(command, { dshEnv: { DSH_SESSION_ID: sessionId } }))
+  const execution = await shell.execute(spec(command, { dshEnv: { DSH_SESSION_ID: sessionId } }))
   const { nonce } = await ready(execution)
   const child = Number(readFileSync(`/tmp/dsh-shell-${nonce}/pid`, 'utf8'))
   try {
@@ -179,7 +202,7 @@ linuxIt('failed cancel control falls back to bounded transport termination witho
 linuxIt('dead transport cannot delete an active nonce or claim guest completion without monitor confirmation', async () => {
   const { shell, spec, runtime, guestHandles } = await setup(false, { frozenGuest: true })
   const sessionId = 'dead-transport-live-guest'
-  const execution = shell.start(spec(command, { dshEnv: { DSH_SESSION_ID: sessionId } }))
+  const execution = await shell.execute(spec(command, { dshEnv: { DSH_SESSION_ID: sessionId } }))
   const { child: monitor, nonce } = await ready(execution)
   const root = `/tmp/dsh-shell-${nonce}`
   const child = Number(readFileSync(`${root}/pid`, 'utf8'))
@@ -207,7 +230,7 @@ linuxIt('dead transport cannot delete an active nonce or claim guest completion 
 
 linuxIt('confirmed monitor completion preserves an ordinary nonzero command exit', async () => {
   const { shell, spec } = await setup()
-  const execution = shell.start(spec('exit 7'))
+  const execution = await shell.execute(spec('exit 7'))
   const result = await execution.result()
   expect(result.exitCode).toBe(7)
   expect(result.aborted).toBe(false)
@@ -220,7 +243,7 @@ linuxIt('pre-aborted execution refuses to spawn a guest command', async () => {
   const { shell, spec } = await setup()
   const abort = new AbortController()
   abort.abort(new Error('already cancelled'))
-  expect(() => shell.start(spec('sleep 60', { signal: abort.signal }))).toThrow('already cancelled')
+  await expect(shell.execute(spec('sleep 60', { signal: abort.signal }))).rejects.toThrow('already cancelled')
 })
 
 linuxIt('onExpiry none keeps the same live handle past its foreground wait and preserves stdin/output', async () => {
@@ -236,7 +259,7 @@ linuxIt('onExpiry none keeps the same live handle past its foreground wait and p
 
 linuxIt('immediate cancellation cannot race monitor startup into starting a user command', async () => {
   const { shell, spec } = await setup()
-  const execution = shell.start(spec('sleep 60'))
+  const execution = await shell.execute(spec('sleep 60'))
   expect(execution.kill()).toBe(true)
   await execution.done
   expect((await execution.result()).exitCode).toBe(130)

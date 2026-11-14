@@ -1,6 +1,12 @@
 # 006 Deployment
 
-Use this guide to install, configure and operate dsh-superagent. It covers accounts, startup checks, upgrades and troubleshooting, building on [001 Domain model](001-domain.md) through [005 Panel](005-panel.md).
+This numbered guide preserves the upstream/native Linux Web reference, building on [001 Domain model](<001-domain.md>) through [005 Panel](<005-panel.md>). **For this Windows Desktop + WSL branch, use the top-level adapter/SETUP guides first. Do not execute the historical Linux Web profile/service/hourly-check procedure against the Desktop instance or start a second service.**
+
+Current branch acceptance is pinned to Node ≥24.9.0, DSH Desktop 0.2.2-rc.3 and dsh-superagent 0.2.0-wsl.1, not all versions in an old range. Source remains in WSL on feature/windows-wsl-hardening; old main lacks the adapter. Generate one self-contained machine tgz with one patch and install through Core plugin_manager, not a main + @local layer or wholesale profile replacement. Raw runtime is disabled, generated runtime enabled, watchers disabled. Historical linked-resolution failures were workarounds, not a mandatory direct-profile-dependency rule: Core dependencyClosure traverses dependencies recursively. Ordinary WSL workspace/XINY plugins can remain; managed adapters now use their own public APIs, not private providers.
+
+For Desktop upgrades: inspect and back up the current profile, pause and confirm managed main/workers/owner jobs/subtrees/effects/cleanup quiescence, normally stop the confirmed Host, and take a consistent SQLite/state backup with matching code/config. Old v2: disable @local configuration first (do not first delete code), inspect old dependency edges and same-name replacement with Core, preserve live Session presets, honor restart-required rather than assuming HMR. Replacing the current production client needs separate User confirmation. Rollback requires matching code/config/consistent DB backup and never automatically restores old source/processing flags.
+
+The requested WSL target is explicit distro/user/UID/HOME, not the default user. Linux, local Windows drive and same-target-distro UNC workspace candidates use real wslpath (including custom automount); Host realpath/stat registration and storage identity checks still apply. Host SQLite requires an actual verified local Windows disk, never UNC/network. The tested UID0/1000 guest-local and Windows-drive full-Runtime combinations, custom automount and a separate Windows ticket-root override have passed in isolation; this is not arbitrary user/mount/version coverage. Managed changes/watch is unsupported; manual refresh is available. Candidate code has internally connected verifiedExecution:true for isolated full-Runtime testing; this is not deployment authorization. Actual old-v2 migration, consistent-DB rollback, live GitHub business closure and browser visual acceptance remain unverified; production has not been deployed.
 
 ## What runs
 
@@ -20,7 +26,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 ## Prerequisites
 
-- Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
+- Current branch: Node.js ≥24.9.0 and DSH 0.2.2-rc.3; pnpm 11.7.0, git 2.32+, Python 3.8+. tmux below is only for the historical native Web service, not required to start a second Linux DSH for Desktop.
 - GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
 - A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
@@ -70,7 +76,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 ## Install
 
-Run this block once, on a machine that has no `superagent` profile yet:
+**Historical native Web reference only; not an installation block for the current Windows branch.** Its DSH 0.2.1-rc.3 was an older upstream baseline, not this branch's supported target. Do not run it as a Desktop upgrade or create a second service. For a separately approved native deployment, first select the corresponding upstream revision and its own prerequisites; do not assume this branch supports that older target:
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.2.1-rc.3
@@ -80,7 +86,7 @@ dsh superagent --from-default-profile web --dump-config > /dev/null
 dsh plugin --profile superagent add "link:$PWD"
 ```
 
-The pinned version above is public; other versions must satisfy `engines.dsh` in `package.json`.
+The version above is historical/public, not the current acceptance version. This branch's engines pin 0.2.2-rc.3; neither an old range nor a development peer check proves other versions or zero vulnerabilities. The earlier 37/0 result was from the Linux development checkout, not the ASAR Host. Host inspection resolved 36 peers; the remaining @deepseek-ai/dsh-client-ui-slots is a type-only contract without emitted JS references. This is not a vulnerability audit.
 
 The fourth command creates `~/.dsh/profiles/superagent` from the DeepSeek Harness Web template. The fifth installs this bundle. Set `DSH_HOME` to relocate the default `~/.dsh` directory.
 
@@ -88,14 +94,14 @@ Run the profile-creation command only for a new installation. If the profile alr
 
 ## Machine configuration
 
-Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) to `~/.dsh/profiles/superagent/cordis.patch.yml`, replacing that file, and replace every `<placeholder>`. For Feishu, also enable the `dsh-superagent-feishu` entry there. The `webserver` entry sets the panel's port.
+The [profile example](<../examples/profile.cordis.patch.yml>) is a native upstream reference, not permission to replace an existing user's patch. Back up and inspect the effective configuration; use Core plugin_manager for the current single-tgz branch. Never overwrite an entire existing profile with the example. Feishu remains disabled/out of this round; native Web port settings below do not ask Desktop users to start a new webserver.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
-After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
+After the first start, edit machine limits through **Settings → Deployment** or Core Plugin Manager, not whole-profile replacement. Native volatile limits may apply in place; current package/target/environment changes can require a restart and maintenance/binding confirmation. Honor actual application/warnings, never assume HMR. `stateDir` is not an in-place migration setting. Invalid values or unknown keys prevent startup.
 
 ## Start and stop
 
@@ -142,7 +148,7 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 ## Settings
 
-Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
+Setup and accepted-binding/maintenance checks must succeed before polling or work starts. Overview lists requirements. For an external authentication fix on the current branch, use Source **Refresh account** and explicit apply/recovery confirmation; a generic Check again/restart is not permission to adopt a different account or clear a cleanup hold. The remaining settings examples describe upstream configuration fields; do not enable sources until the current branch's paused confirmation and acceptance procedure finishes.
 
 1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
 2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
@@ -185,7 +191,7 @@ Health entries are grouped by responsibility:
 | `runtime` | The application itself |
 | `models` | Sessions waiting on a model-budget retry |
 | `evals` | Unavailable Evals from the last hour with no later judgement or dismissal |
-| `assessment`, `launch`, `delivery`, `relay`, `notice`, `reply` | Stored work described in [003 Execution](003-execution.md); delivery counts waiting work, while reply covers Channel messages |
+| `assessment`, `launch`, `delivery`, `relay`, `notice`, `reply` | Stored work described in [003 Execution](<003-execution.md>); delivery counts waiting work, while reply covers Channel messages |
 | `worker` | Executor Session event handling; appears after its first failure |
 | `github`, `feishu`, `history` | Source polling, events and history recovery |
 | `sync:<source id>` | Allowed-list synchronization |
@@ -200,17 +206,23 @@ A refusal has a status and `error`, its English text:
 The blocks:
 
 - `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
-- `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
+- `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](<002-authorization.md>)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
 - `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
 
-Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
+For current account binding, do not use a legacy settings PUT/restart as a bypass. The Source card's refresh uses `POST sources/:id/accounts/refresh`: business GET identity/permission observation only, no stage/settings/env/cursor/source poll/pass, and no automatic hold release. A different identity/target needs `POST sources/:id/accounts/apply` with a fresh planToken and confirmed=true, paused and truly quiescent with no old business backlog. Legacy history needs explicit binding acceptance; a different repository ID with history cannot share state. Account cutover starts at T without replaying older notifications; CI revisions are not reset. Applied changes can be restart-pending, not HMR, and remain paused.
+
+Exact-same accepted-binding health recovery (verified through isolated real API routes with offline stand-ins, not live-account acceptance) instead readonly-verifies the existing generation/config/helper/CLI/target, preserving durable backlog, cursors and generation, and clears only the account hold. It never stages, restarts, requests a pass or unpauses; Open backlog alone is not a permanent dead end. Real inflight activity, other safety holds and persistent cleanup-unconfirmed markers still block. Refresh cannot clear cleanup markers; there is no force-continue. Execution status shows the independent safety hold and links to Source checking.
+
+Deployment preview uses `POST deployment/preview`: no external execution and ready=false even if valid. Explicit `POST deployment/diagnose` is business-read-only but runner /tmp cancellation state and gh caches may be written. network and confirmWrite independently default false and require independent consent; the write probe is 4096 bytes in an owned child of an existing verified workspace. No prepare/Ticket/Session/Model/source poll. Local pass does not prove account/model/task closure. Neither route saves/applies candidate configuration.
+
+The historical native PUT shape below is reference only, not an account-binding apply bypass or instruction to run a new service. Keep the Source disabled while configuring; use the existing confirmed endpoint and substitute the placeholders:
 
 ```sh
-api=http://127.0.0.1:3082/orchestrator/api
-rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.sources[] | select(.id == "github") | .revision')
-curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' $api/settings/source:github \
-  -d "{\"value\": {\"enabled\": true, \"config\": {\"repository\": \"acme/widgets\", \"cli\": \"$HOME/.local/bin/gh-agent\"}}, \"revision\": $rev}"
+api='http://127.0.0.1:<CURRENT_PORT>/orchestrator/api'
+rev=$(curl -s -H 'x-orchestrator-request: 1' "$api/settings" | jq '.sources[] | select(.id == "github") | .revision')
+curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json' "$api/settings/source:github" \
+  -d "{\"value\": {\"enabled\": false, \"config\": {\"repository\": \"<GITHUB_OWNER>/<GITHUB_REPO>\", \"cli\": \"<AGENT_CLI_ABSOLUTE_PATH>\"}}, \"revision\": $rev}"
 ```
 
 ## Setup checks
@@ -232,10 +244,10 @@ From an allowed GitHub account, open an Issue or post a comment containing `@<ag
 
 ## Upgrade
 
-1. Wait until no Executor is in the middle of a turn.
-2. Back up `<stateDir>/orchestrator.sqlite`.
-3. Run `git pull && pnpm install && pnpm build`.
-4. Run `scripts/dsh-superagent restart` and inspect its status.
+1. Inspect/back up effective profile configuration, pause processing and close Source admissions. Confirm main/workers/owner jobs/managed subtrees/effects and cleanup are quiescent; no foreground turn alone is insufficient.
+2. Normally stop the confirmed Host and back up consistent SQLite/state with the corresponding code/config. An online main-file-only copy may miss WAL and is not a backup guarantee.
+3. Preserve WSL checkout changes and select the approved branch/revision. Build/generate a fresh single tgz only with separate installation/build authorization; do not blindly pull or copy Windows source.
+4. Upgrade using Core plugin_manager, inspect dependency/application warnings and restart-required, then restart the existing Host only with confirmation. Old @local layers must be disabled first without prematurely deleting code/live presets. Revalidate identity, target and model/prepare/policy; remain paused with sources off until explicitly resumed.
 
 A restart ends running Assignments and starts replacements with recovery notes. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
 

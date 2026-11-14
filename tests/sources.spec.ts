@@ -3,6 +3,7 @@ import { Engine, MemoryRepositories, key, type Assessor, type Executor, type Thr
 import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, feishuTime, feishuTrigger, historyEvent }
   from '../src/sources/feishu.ts'
 import { KV } from '../src/kv.ts'
+import { MaintenanceGate } from '../src/execution/maintenance.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
 import { runFeishu } from '../src/sources/feishu-loops.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
@@ -1404,4 +1405,73 @@ describe('observing the GitHub repository', () => {
     expect(h.receive.mock.calls[0]![0].text).toContain('Read github/commits/bbb2222/checks for every check.')
     h.store.close()
   })
+  it('clamps old notification/retry/thread fallback reads and never replays pre-cutover comments', async () => {
+    const h = host()
+    observe(h, {})
+    const cutoff = at(1), old = at(0)
+    h.store.set(KV.github.cutoff, cutoff)
+    h.store.set(KV.github.since, old)
+    h.store.set(KV.github.retries, { '9': { since: old, pr: false } })
+    subscribed(h, { source: 'github', id: '10' }, { isPr: false, title: 'Old subscribed issue' })
+    const thread = h.store.threads.get('github:10')!
+    h.store.threads.save({ ...thread, createdAt: old })
+    const comment = (id: number, timestamp: string) => ({ id, body: `comment ${id}`, user: { login: 'alice', type: 'User' }, created_at: timestamp, updated_at: timestamp })
+    const reads = github(h, { notifications: [], 'issues/9': issue(9, { created_at: old }),
+      'issues/9/comments': [comment(1, old), comment(2, at(2))], 'issues/10/comments': [comment(3, old), comment(4, at(2))] })
+    await pollRound(h)
+    const since = reads.filter(path => path.includes('since='))
+    expect(since.length).toBeGreaterThanOrEqual(3)
+    for (const path of since) expect(Date.parse(decodeURIComponent(/since=([^&]+)/.exec(path)![1]!))).toBeGreaterThanOrEqual(Date.parse(cutoff))
+    expect(h.receive.mock.calls.map(([trigger]) => trigger.text)).toEqual(['comment 2', 'comment 4'])
+    expect(Date.parse(h.store.get(KV.github.since)!)).toBeGreaterThanOrEqual(Date.parse(cutoff))
+    for (const number of [9, 10]) expect(Date.parse(h.store.get(KV.github.cursor(number))!)).toBeGreaterThanOrEqual(Date.parse(cutoff))
+    h.store.close()
+  })
+  it('clamps stream starts and five-second overlap, dropping the old request ETag at cutover', async () => {
+    const h = host()
+    observe(h, { observeIssues: true })
+    const cutoff = at(1), justAfter = new Date(Date.parse(cutoff) + 1000).toISOString()
+    h.store.set(KV.github.cutoff, cutoff)
+    h.store.set(KV.github.since, at(0))
+    h.store.set(KV.github.stream('issues'), { since: at(0), started: { issues: at(0) }, etag: 'old-account-etag' })
+    const calls = repository(h, { issues: [issue(1, { created_at: at(0), updated_at: at(0) }), issue(2, { created_at: justAfter, updated_at: justAfter })] })
+    await pollRound(h)
+    const request = calls.find(args => args[1]!.startsWith('repos/acme/widgets/issues?'))!
+    expect(request).not.toContain('If-None-Match: old-account-etag')
+    expect(request[1]).toContain(`since=${encodeURIComponent(cutoff)}`)
+    expect(h.receive.mock.calls.map(([trigger]) => trigger.meta.number)).toEqual([2])
+    expect(h.store.get(KV.github.stream('issues'))).toMatchObject({ since: cutoff, started: { issues: cutoff } })
+    h.store.close()
+  })
+  it('establishes a fresh CI baseline after account cutover without resetting the old revision counter', async () => {
+    const h = host()
+    observe(h, { observeCi: true })
+    h.store.set(KV.github.ciBaseline, at(1))
+    h.store.set(KV.github.branchCi, { branch: 'main', failures: [], revision: 31 })
+    const answers = { branch: { sha: 'cutover-head', checks: [{ name: 'lint', status: 'completed', conclusion: 'failure' }] } }
+    repository(h, answers)
+    await pollRound(h)
+    expect(h.receive).not.toHaveBeenCalled()
+    expect(h.store.get(KV.github.branchCi)).toMatchObject({ revision: 31, failures: ['lint'], baseline: at(1) })
+    answers.branch.checks = [{ name: 'lint', status: 'completed', conclusion: 'success' }]
+    await pollRound(h)
+    expect(h.receive).toHaveBeenCalledOnce()
+    expect(h.store.get(KV.github.branchCi)?.revision).toBe(32)
+    h.store.close()
+  })
+  it('holds the entire source polling round as activity, including gaps between command calls', async () => {
+    const maintenance = new MaintenanceGate(), h = host({ maintenance })
+    observe(h, {})
+    let finish!: (value: string) => void
+    vi.spyOn(h.commands, 'run').mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const running = pollRound(h.context(githubKind))
+    await vi.waitFor(() => expect(maintenance.activityBlockers()).toContainEqual({ code: 'activity-source' }))
+    finish('HTTP/2.0 200 OK\r\n\r\n[]')
+    await running
+    expect(maintenance.activityBlockers()).toEqual([])
+    maintenance.hold('identity', { code: 'account-health-hold' })
+    await expect(pollRound(h.context(githubKind))).rejects.toThrow('blocked by maintenance')
+    h.store.close()
+  })
+
 })

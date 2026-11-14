@@ -2,7 +2,11 @@
 
 **适用项目：`<PROJECT_NAME>`**
 
-**版本：v1.0（公开脱敏版）｜整理日期：2026-11-14（北京时间）**
+**版本：v1.1（公开脱敏版，保留全部 47 节）｜安装说明更新：2026-11-15（北京时间）**
+
+> **本分支优先入口：** [SETUP](<../SETUP.md>) / [Windows Desktop + WSL 安装、升级与回滚](<../WSL-ADAPTER.md>) / [支持矩阵](<../WSL-VERIFICATION.md>)。以下双机、飞书、子代理与 GitCode 场景仅保留参考，本轮不开发、不自动启动第二 Linux DSH/第二服务/定时巡检或真实接单。source 仍 Root 总集成，guest-local/Windows 本地盘、自定义 mount 及独立 Windows ticket override 的已测完整 Runtime 组合已通过，候选代码内部已接通 special API verifiedExecution:true 用于隔离完整 Runtime 测试，不是部署授权；实际旧 v2 迁移、一致 DB 回滚、真实 GitHub 业务及浏览器视觉仍未验，当前生产未部署。
+>
+> 当前固定目标是 Desktop 0.2.2-rc.3、Node ≥24.9.0、dsh-superagent 0.2.0-wsl.1。源码只在 WSL 的 `feature/windows-wsl-hardening` 分支维护，旧 main 无适配。部署制品为一个 self-contained tgz/唯一 patch，不再“主包 + @local 配置层”；raw runtime 默认 disabled、机器版 runtime enabled、watcher 默认 disabled。历史 linked 解析 workaround 不是 Core 直接依赖硬限制，dependencyClosure 递归 dependencies。此前 37/0 peer 检查仅来自 Linux 开发 checkout，并非 ASAR Host；Host 实查 36 个可 resolve，另一个 `@deepseek-ai/dsh-client-ui-slots` 为纯 type contract、无产物 JS 引用，不能称 37 个 Host peer 全部 resolve，也不是漏洞审计或零漏洞结论。
 
 **目标：外网开发、内网测试，先以 GitHub Issue 明确派单跑通流程。**
 
@@ -40,16 +44,16 @@
 
 ## 目录
 
-1. [配置结论与当前状态](#1-配置结论与当前状态)
-2. [内外网公共配置](#2-内外网公共配置)
-3. [外网机配置](#3-外网机配置)
-4. [内网机配置](#4-内网机配置)
-5. [账号与 Git 身份隔离](#5-账号与-git-身份隔离)
-6. [实际派单和开发测试闭环](#6-实际派单和开发测试闭环)
-7. [故障排查](#7-故障排查)
-8. [验收清单与后续工作](#8-验收清单与后续工作)
-9. [上游安装方式与版本说明](#9-上游安装方式与版本说明)
-10. [参考资料](#10-参考资料)
+1. [配置结论与当前状态](<#1-配置结论与当前状态>)
+2. [内外网公共配置](<#2-内外网公共配置>)
+3. [外网机配置](<#3-外网机配置>)
+4. [内网机配置](<#4-内网机配置>)
+5. [账号与 Git 身份隔离](<#5-账号与-git-身份隔离>)
+6. [实际派单和开发测试闭环](<#6-实际派单和开发测试闭环>)
+7. [故障排查](<#7-故障排查>)
+8. [验收清单与后续工作](<#8-验收清单与后续工作>)
+9. [上游安装方式与版本说明](<#9-上游安装方式与版本说明>)
+10. [参考资料](<#10-参考资料>)
 
 ---
 
@@ -616,18 +620,18 @@ Superagent ──专用 gh-agent── 独立配置── <DEV_AGENT_GITHUB_LOGI
 
 ### 5.4 从共享账号安全迁移的顺序
 
-对正在运行的机器，应按以下顺序：
+对正在运行的机器，当前 hardening 分支应按以下顺序（不是执行授权）：
 
-1. 确认没有正在运行或排队的相关工单；必要时暂停接单。
-2. 创建并验证独立 Agent 配置与包装器。
-3. 改 Superagent 来源 CLI，按实际运行方式局部重载。
-4. 确认运行身份、worker gh shim、Git helper 都使用 Agent 入口。
-5. 再将普通 gh 设为个人账号。
-6. 如果普通 GitHub HTTPS Git 也要跟随个人账号，再配置对应 helper。
-7. 恢复原来的运行状态并检查新轮询。
-8. 另外安排有明确授权的推送验收；不通过随意改线上分支来“测试”。
+1. 先检查/备份有效 profile，暂停 processing 并关闭来源入口；确认全部 managed 主 Session、worker、owner jobs、子树、effects/outbox/source polls 均静止且 cleanup 已确认。仅“无运行工单”不充分。
+2. 正常关闭获准的目标 Host，制作匹配 code/config 的一致 SQLite/state backup；在线单独复制主 DB 不可靠。实际替换当前生产客户端需另一次 User confirmation。
+3. 只有另获授权才由操作者创建/登录独立 Agent 包装器；不让文档 Agent 自动切个人账号。来源卡片刷新只 GET identity/权限，不 stage、不改 settings/env/cursor、不 poll/pass，也不自动清 hold。
+4. 不同 identity/target 必须明确 apply，paused + 真正 quiescent 且无旧业务积压；复核稳定 account/repo IDs、CLI、generation/helper 和 target。换账号 cutoff T、不回放旧通知、CI revision 不归零；repo ID 不同且有 history 拒绝同 state 迁移。
+5. 真实切换可能返回 restart-required/restart-pending，按确认流程重启现有 Host；不宣称 HMR 已完成。首次 legacy history 必须明确接受 binding；旧 target 不匹配拒绝，不迁 Windows 历史 Session 为 WSL。
+6. **完全 same accepted binding 的 health recovery（离线替身的真实 API 路由已验，不等同账号联网验收）**走 readonly 既有 generation/config/helper/CLI 验证，只清 account hold；保留持久待办/游标/generation，不 stage/restart/pass/unpause。Open backlog 本身不是此恢复永久死路，但真实 inflight、cleanup marker、其他安全 hold 仍阻断。
+7. cleanup unconfirmed marker 持久，刷新账号不清除，无强制继续。Execution 状态独立显示安全 hold 并跳来源检查。不要删库或清游标来解锁。
+8. 账号/模型/允许名单/prepare/maxWorkers 确认及矩阵验收后，**另行显式批准**启用来源与恢复 processing；不自动恢复旧 flags。真实评论、push、业务闭环另批，不能拿只读 API 或本地 pass 代替。
 
-**来源示例中的桌面适配曾记录**来源 CLI 变化能局部重载并更新生成的入口，无需重启整个 DSH；这不是对读者环境的验证。其他版本或部署方式不能默认具备相同行为。
+**来源示例中的旧桌面适配曾记录**来源 CLI 变化能局部重载；这是旧版历史行为，不是当前新单包可假定的热更新保证。旧 v2 升级先停用 @local 配置层，不先删 code，再由 Core plugin_manager 处理旧依赖与同名主包替换；不手改整个用户 profile，不删活 Session 预设。回滚须匹配旧代码/config/一致 DB backup，并保持暂停/来源关闭。完整步骤见 [当前安装流程](<../WSL-ADAPTER.md>)。
 
 ### 5.5 普通 GitHub HTTPS helper 的配置形式
 
@@ -853,7 +857,26 @@ source "<PERSONAL_FUNCTIONS_FILE>"
 
 ## 9. 上游安装方式与版本说明
 
-本节是**新建纯 WSL 服务的备选参考**，不是要求重装已有桌面实例。来源示例使用本地桌面 WSL 适配，不能把以下命令当成它的启动方式；更不能把历史记录视为读者环境已通过。
+本节先给当前分支入口，之后的旧 Linux Web 命令仅作**来源历史参考**，不是要求新建第二服务或重装已有桌面实例；更不能把历史记录视为读者环境已通过。
+
+当前 Windows Desktop + WSL 新机器在 WSL 中检出授权公开 fork（发布目的地，不是业务账号）：
+
+```bash
+mkdir -p "$HOME/src"
+git clone --branch feature/windows-wsl-hardening --single-branch \
+  https://github.com/ZzuMrW/dsh-superagent-prototype.git \
+  "$HOME/src/dsh-superagent-prototype"
+```
+
+不要覆盖已存在原仓库，不复制开发源码到 Windows。Node ≥24.9.0、Desktop 0.2.2-rc.3 固定验收；构建后的生成器必须提供 `--out=... --state-dir=... --distro=... --user=... --work-root=...`，输出单个 dsh-superagent 0.2.0-wsl.1 tgz，由 Core 插件管理器安装。真实 wslpath 支持自定义 mount；workRoot 可为 Linux、Windows local drive、同 target distro UNC，仍须 Host realpath/stat 登记；Host SQLite 只能可靠本地 Windows disk（含实际盘检查），不能 UNC/network。
+
+UID0/1000、guest-local/Windows 本地盘、自定义 mount 及独立 Windows ticket override 的已测完整 Runtime 组合已通过；仅限已测环境，不替代实际旧 v2 迁移、一致 DB 回滚、真实 GitHub 业务或浏览器视觉验收，当前生产未部署。普通 WSL workspace/XINY 插件可保留；本适配不再用其 private provider，均为 own public adapters。managed changes/watch unsupported，手动刷新可用，不叫 livewatch 已完成。不支持任意 bind/net mounts、所有版本或 OS sandbox。
+
+新机器的完整备份、暂停/quiescence、单包生成/安装、首次配置、旧 v2 升级和回滚见 [Windows 操作流程](<../WSL-ADAPTER.md>)。先确认新目标/备份，首次 source/允许名单/模型/prepare/maxWorkers=1 和 legacy binding，再显式恢复；不要直接套用下方历史 Web 命令。
+
+诊断边界：static preview 无外部执行且 ready=false；显式 diagnose 业务只读但 runner 可写 /tmp 取消标记、gh 可写缓存。network 与 owned workspace 内 4 KiB 写探针分别默认 false、分别同意；无 prepare/Ticket/Session/Model/source poll。不能称本地通过就完成账号/模型/任务闭环。
+
+**下述命令属于旧纯 Linux Web 手册，不适用于当前 Windows 分支，不在本轮执行。**
 
 上游原型部署文档采用独立 DSH Web profile，服务脚本依赖 Unix 工具。来源手册此前核对的部署基线为 `@deepseek-ai/dsh@0.2.1-rc.3`；Windows DSH Desktop 版本与 WSL 单独安装的 CLI 版本是两回事。公开版本号用于说明来源版本，不保证任意新版本兼容。
 
@@ -895,24 +918,24 @@ dsh plugin --profile superagent add "link:$PWD"
 
 ### Superagent
 
-- [项目仓库](https://github.com/deepseek-ai/dsh-superagent-prototype)
-- [部署说明](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/006-deployment.md)
-- [授权与准入](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/002-authorization.md)
-- [执行与工作区](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/003-execution.md)
-- [提示词配置](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/004-prompts.md)
-- [面板说明](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/005-panel.md)
-- [GitHub 来源源码](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/src/sources/github.ts)（保留第三方官方技术基线，不是业务项目提交或个人验收证据；部署时仍按实际版本核对）
-- [DSH Desktop 0.2.2-rc.3 说明](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.3/apps/desktop/README.md)
+- [项目仓库](<https://github.com/deepseek-ai/dsh-superagent-prototype>)
+- [部署说明](<https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/006-deployment.md>)
+- [授权与准入](<https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/002-authorization.md>)
+- [执行与工作区](<https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/003-execution.md>)
+- [提示词配置](<https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/004-prompts.md>)
+- [面板说明](<https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/005-panel.md>)
+- [GitHub 来源源码](<https://github.com/deepseek-ai/dsh-superagent-prototype/blob/8c32a9dc5d72c033816c6a8110b37f40cf94fba4/src/sources/github.ts>)（保留第三方官方技术基线，不是业务项目提交或个人验收证据；部署时仍按实际版本核对）
+- [DSH Desktop 0.2.2-rc.3 说明](<https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.3/apps/desktop/README.md>)
 
 ### Git / GitHub
 
-- [Git 凭据助手](https://git-scm.com/docs/gitcredentials)
-- [Git 配置](https://git-scm.com/docs/git-config)
-- [gh 环境变量与优先级](https://cli.github.com/manual/gh_help_environment)
-- [gh 登录](https://cli.github.com/manual/gh_auth_login)
-- [GitHub 通知 API](https://docs.github.com/en/rest/activity/notifications)
-- [GitHub App 安装范围与权限检查](https://docs.github.com/en/apps/using-github-apps/reviewing-and-modifying-installed-github-apps)
-- [GitHub REST 权限错误排查](https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api#resource-not-accessible)
+- [Git 凭据助手](<https://git-scm.com/docs/gitcredentials>)
+- [Git 配置](<https://git-scm.com/docs/git-config>)
+- [gh 环境变量与优先级](<https://cli.github.com/manual/gh_help_environment>)
+- [gh 登录](<https://cli.github.com/manual/gh_auth_login>)
+- [GitHub 通知 API](<https://docs.github.com/en/rest/activity/notifications>)
+- [GitHub App 安装范围与权限检查](<https://docs.github.com/en/apps/using-github-apps/reviewing-and-modifying-installed-github-apps>)
+- [GitHub REST 权限错误排查](<https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api#resource-not-accessible>)
 
 ### 本次部署验收记录模板（不是已完成证据）
 

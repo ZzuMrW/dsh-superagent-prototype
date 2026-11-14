@@ -22,6 +22,7 @@ import { githubKind } from '../../src/sources/github.ts'
 import type { Health } from '../../src/sources/host.ts'
 import type { SourceKind } from '../../src/sources/kind.ts'
 import { testDeployment } from './deployment.ts'
+import { previewDeployment } from '../../src/execution/preview.ts'
 
 export const MEMBER = 'ou_alice'
 const ALLOWED: Record<string, { id: string; name?: string }[]> = { feishu: [{ id: MEMBER, name: 'Alice' }], github: [{ id: 'alice' }] }
@@ -80,7 +81,7 @@ const dayAgo = () => new Date(Date.now() - 86_400_000).toISOString()
 export const problemOf = (code: SetupCode, values: Record<string, string> = {}) => new SetupError(code, values).problem
 // The kinds' configurations differ, and the fake reads them only as the records the views carry.
 const KINDS = [feishuKind, githubKind] as unknown as SourceKind[]
-export const MACHINE = { stateDir: '/srv/dsh-superagent', promptMaxChars: 100000, admissionContextMaxPages: 10,
+export const MACHINE = { stateDir: '/srv/dsh-superagent', wsl: false as const, promptMaxChars: 100000, admissionContextMaxPages: 10,
   admissionContextTimeoutMs: 15000 }
 
 type Settings = ReturnType<typeof SettingsSchema.parse>
@@ -160,8 +161,8 @@ function sourceStatuses(): SourceStatusRow[] {
 const stateView = (): StateView => ({
   setup: server.setup, load: { running: server.setup.problem ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers },
   masterId: 'master', paused: server.settings.paused,
-  // The panel does not read health; the service script does.
-  health: {},
+  // Safety holds are visible to the panel as well as to the status script.
+  health: { ...server.health },
 })
 const settingsView = (): ApiResponse<'GET settings'> => ({
   policyVersion: 'abcdef1234567890',
@@ -188,7 +189,8 @@ const overviewView = (): ApiResponse<'GET overview'> => {
       ...server.threads.filter(thread => thread.evaluating && thread.evaluating.deadline < new Date().toISOString())
         .map(thread => ({ kind: 'eval-overdue' as const, thread })),
       { kind: 'eval-unavailable' as const, decisionId: 'u1', thread: threadSummary(), reason: [{ code: 'timeout' }], triggerId: 'e3' },
-      ...server.settings.paused ? [{ kind: 'executor-paused' as const }] : [],
+      ...server.health.execution?.state === 'paused' ? [{ kind: 'execution-held' as const, detail: server.health.execution.detail }]
+        : server.settings.paused ? [{ kind: 'executor-paused' as const }] : [],
       // As on the host, every entry in error that is not a Source's own, a Policy sync, or the individually listed unavailable Evals is a runtime-error.
       ...Object.entries(server.health).filter(([name, item]) => item.state === 'error' && !KINDS.some(kind => kind.health.includes(name))
         && !name.startsWith('sync:') && name !== 'evals')
@@ -300,6 +302,17 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   } },
   'GET sources': { answer: sourceStatuses },
   'GET settings': { answer: settingsView },
+  'POST deployment/preview': { body: true, answer: ({ body }) => previewDeployment(body) },
+  'POST deployment/diagnose': { body: true, answer: ({ body }) => ({ kind: 'diagnosis', status: 'blocked', ready: false,
+    static: previewDeployment(body.candidate), checks: [{ code: 'DIAGNOSIS_FIXTURE_UNAVAILABLE', status: 'blocked', detail: 'No real diagnostic is configured in this panel fixture' }],
+    effects: [], restart: 'not-applied' }) },
+  'POST sources/:id/accounts/refresh': { answer: ({ params }) => params.id === 'github'
+    ? { ok: false, status: 'unavailable', code: 'probe-failed' } : refuse(404, 'Account refresh is unavailable for this Source') },
+  'POST sources/:id/accounts/apply': { body: true, answer: ({ params, body }) => {
+    if (params.id !== 'github') return refuse(404, 'Account refresh is unavailable for this Source')
+    z.object({ planToken: z.string().min(1), confirmed: z.literal(true) }).strict().parse(body)
+    return { ok: false, status: 'unavailable', code: 'invalid-token' }
+  } },
   'POST sources/:id/labels': { answer: () => {
     // Label refresh failures come from the bot CLI and are returned verbatim.
     if (server.joinError) return refuse(500, server.joinError)

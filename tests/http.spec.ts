@@ -1,4 +1,5 @@
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
+import { MaintenanceGate } from '../src/execution/maintenance.ts'
 import { z } from 'zod'
 import { registerHttp } from '../src/app/http.ts'
 import { PromptConflict } from '../src/app/prompts.ts'
@@ -6,6 +7,7 @@ import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
+import { testDeployment } from './fixtures/deployment.ts'
 
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
@@ -95,4 +97,59 @@ it('answers a prompt save that lost a race with 409, and a settings body over 12
   expect(await call('PUT', 'settings/executor', { value, revision: 0 })).toEqual({ status: 400,
     body: { error: `Request exceeds ${128 * 1024} bytes` } })
   expect(saves).toEqual([])
+})
+
+
+it('exposes account refresh/apply only for GitHub with bounded explicit confirmation', async () => {
+  const refresh = vi.fn(async () => ({ ok: false, status: 'unavailable', code: 'probe-failed' }))
+  const apply = vi.fn(async () => ({ ok: false, status: 'unavailable', code: 'invalid-token' }))
+  const call = serve({ accounts: { refresh, apply } })
+  expect(await call('POST', 'sources/github/accounts/refresh')).toMatchObject({ status: 200, body: { code: 'probe-failed' } })
+  expect(await call('POST', 'sources/feishu/accounts/refresh')).toMatchObject({ status: 404 })
+  for (const body of [{ planToken: 'plan', confirmed: false }, { planToken: '', confirmed: true }, { planToken: 'plan', confirmed: true, force: true }]) {
+    expect(await call('POST', 'sources/github/accounts/apply', body)).toMatchObject({ status: 400 })
+  }
+  expect(apply).not.toHaveBeenCalled()
+  expect(await call('POST', 'sources/github/accounts/apply', { planToken: 'plan', confirmed: true })).toMatchObject({ status: 200, body: { code: 'invalid-token' } })
+  expect(apply).toHaveBeenCalledExactlyOnceWith('plan', true)
+  expect(await call('POST', 'sources/github/accounts/apply', { planToken: 'x'.repeat(5000), confirmed: true })).toMatchObject({ status: 400 })
+})
+
+it('account maintenance routes retain same-origin enforcement and do not bypass health holds for business actions', async () => {
+  const maintenance = new MaintenanceGate()
+  maintenance.hold('identity', { code: 'account-health-hold' })
+  const refresh = vi.fn(async () => ({ ok: false, status: 'unavailable', code: 'probe-failed' }))
+  const retryTicket = vi.fn()
+  const call = serve({ maintenance, accounts: { refresh, apply: vi.fn() }, store: { tickets: { get: () => ({}) } }, engine: { retryTicket } })
+  expect(await call('POST', 'sources/github/accounts/refresh', undefined, { origin: 'http://evil.example' })).toMatchObject({ status: 403 })
+  expect(refresh).not.toHaveBeenCalled()
+  expect(await call('POST', 'sources/github/accounts/refresh')).toMatchObject({ status: 200 })
+  expect(await call('POST', 'tickets/old/retry')).toMatchObject({ status: 409, body: { blockers: [{ code: 'account-health-hold' }] } })
+  expect(retryTicket).not.toHaveBeenCalled()
+})
+
+it('serves pure preview while held and keeps explicit diagnostics tracked and same-origin', async () => {
+  const maintenance = new MaintenanceGate(); maintenance.hold('account', { code: 'account-health-hold' })
+  const settings = SettingsSchema.parse({ paused: true }), cleanup = vi.fn(), pass = vi.fn()
+  const track = vi.fn(async (work: () => Promise<unknown>) => work())
+  const call = serve({ machine: testDeployment(), maintenance, lifetime: new AbortController().signal,
+    trackDiagnostic: track, recordExecutionCleanup: cleanup, store: { settings: () => settings }, requestPass: pass })
+  const candidate = { stateDir: 'C:\\state', wsl: false, executor: { directory: '', prepare: '', blockedCommands: [] } }
+  expect(await call('POST', 'deployment/preview', candidate)).toMatchObject({ status: 200, body: { kind: 'static', ready: false, valid: true } })
+  expect(track).not.toHaveBeenCalled()
+  expect(await call('POST', 'deployment/diagnose', { candidate })).toMatchObject({ status: 200, body: { kind: 'diagnosis', status: 'blocked', ready: false } })
+  expect(track).toHaveBeenCalledTimes(1)
+  expect(await call('POST', 'deployment/diagnose', { candidate, network: 'true' })).toMatchObject({ status: 400 })
+  const observed = track.mock.calls.length
+  expect(await call('POST', 'deployment/diagnose', { candidate }, { origin: 'http://evil.example' })).toMatchObject({ status: 403 })
+  expect(track).toHaveBeenCalledTimes(observed)
+  expect(cleanup).not.toHaveBeenCalled(); expect(pass).not.toHaveBeenCalled()
+  expect(settings.paused).toBe(true)
+})
+
+it('does not run untracked diagnostics when a partial profile only exposes static preview', async () => {
+  const call = serve({})
+  const candidate = { stateDir: 'C:\\state', wsl: false }
+  expect(await call('POST', 'deployment/preview', candidate)).toMatchObject({ status: 200, body: { kind: 'static', ready: false } })
+  expect(await call('POST', 'deployment/diagnose', { candidate })).toMatchObject({ status: 404 })
 })

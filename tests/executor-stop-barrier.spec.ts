@@ -4,7 +4,7 @@ function fixture() {
   const drainDescendants = vi.fn(async () => {})
   const agent = { id: 'worker-ticket', status: 'idle' }
   const host = {
-    context: { get: (name: string) => name === 'subagents' ? { drainDescendants } : undefined,
+    context: { get: (name: string) => name === 'subagents' ? { drainDescendants, listDescendants: async () => [] } : undefined,
       agents: new Map([['worker-ticket', agent]]) },
     store: { tickets: { list: () => [{ id: 'ticket' }] } },
     effects: { handle: vi.fn() }, lifetime: new AbortController().signal,
@@ -32,6 +32,11 @@ describe('failed background stop is a sticky launch/delivery barrier', () => {
     await expect(barrier.stopped('ticket')).rejects.toThrow('refusing new work')
     barrier.track('ticket', Promise.resolve())
     await expect(barrier.stopped('ticket')).resolves.toBeUndefined()
+  })
+  it('rejects final teardown when descendant drain fails instead of swallowing the error', async () => {
+    const { executor, drainDescendants } = fixture()
+    drainDescendants.mockRejectedValueOnce(new Error('drain failed'))
+    await expect(executor.shutdown()).rejects.toThrow('Worker shutdown failed')
   })
   it('uses the irreversible exact-root drain only during real Host teardown', async () => {
     const { executor, drainDescendants, agent } = fixture()

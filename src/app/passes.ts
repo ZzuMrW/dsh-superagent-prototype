@@ -2,12 +2,14 @@
 import type { Engine, ReceiveResult, Trigger } from '../core/index.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import type { Effects } from './effects.ts'
+import type { MaintenanceGate } from '../execution/maintenance.ts'
 
 export interface PassesHost {
   readonly engine: Pick<Engine, 'receive' | 'evaluateDue'>
   readonly effects: Pick<Effects, 'kick' | 'idle'>
   readonly health: HealthEntry
   readonly lifetime: AbortSignal
+  readonly maintenance?: MaintenanceGate
   configured(): boolean
   closing(): boolean
 }
@@ -33,11 +35,13 @@ export class Passes {
   }
   receive(trigger: Trigger): ReceiveResult {
     if (this.host.closing()) throw new Error('Orchestrator is stopping')
+    this.host.maintenance?.assertOpen()
     const result = this.host.engine.receive(trigger)
     if (result === 'stored') this.request()
     return result
   }
   request(): void {
+    if (this.host.maintenance?.blockers().length) return
     const { health } = this.host
     this.pump().then(() => {
       if (health.get()?.state !== 'error' || this.host.lifetime.aborted) return
@@ -55,15 +59,18 @@ export class Passes {
   /** Run one pass, coalescing concurrent callers into a single follow-up pass. */
   async pump(): Promise<void> {
     // Do not assess, dispatch, or send while waiting for setup; queued work waits for the restart that completes setup.
-    if (!this.host.configured() || this.host.closing()) return
+    if (!this.host.configured() || this.host.closing() || this.host.maintenance?.blockers().length) return
     if (!this.pumping) return this.pumping = this.pumpOnce().finally(() => { this.pumping = undefined })
     const next = () => { this.pumpAgain = undefined; return this.pump() }
     return this.pumpAgain ??= this.pumping.then(next, next)
   }
   private async pumpOnce(): Promise<void> {
-    this.host.effects.kick()
-    if (this.host.closing()) return
-    // While processing is paused, the Engine only records the pause on active Evals so they do not expire.
-    this.host.engine.evaluateDue()
+    const release = this.host.maintenance?.admit('effect', 'orchestration-pass')
+    try {
+      this.host.effects.kick()
+      if (this.host.closing()) return
+      // While processing is paused, the Engine only records the pause on active Evals so they do not expire.
+      this.host.engine.evaluateDue()
+    } finally { release?.() }
   }
 }

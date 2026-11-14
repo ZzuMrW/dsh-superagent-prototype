@@ -9,6 +9,7 @@ import { key, latestAssignment, latestReport, liveTicket, runningAssignment, thr
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
   from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
+import type { ExecutionSnapshot } from '../execution/target.ts'
 import { runAsWorker, verifyDirectory, workerEnvironment } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
@@ -70,6 +71,8 @@ export interface ExecutorHost {
   readonly health: HealthEntry
   readonly machine: Pick<Machine, 'stateDir' | 'wsl'>
   readonly lifetime: AbortSignal
+  /** Pure metadata preparation reads an already verified snapshot; it must never perform external I/O in a transaction. */
+  executionSnapshot?(): ExecutionSnapshot | undefined
   /** Session manager for worker sessions and for relaying worker reports to the main Session. */
   readonly sessions: Pick<Sessions, 'ensure' | 'prompt' | 'promptedId' | 'relay' | 'holds'>
   closing(): boolean
@@ -96,7 +99,7 @@ export function mandateInstructions(mandate: Pick<Mandate, 'strength'>): string 
 }
 /** Builds a newly accepted ticket's Execution metadata: its worktree name, workspace directory, and assignment text. */
 export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>, settings: Settings,
-  stateDir: string, wsl?: Machine['wsl']): Execution {
+  stateDir: string, wsl?: Machine['wsl'], snapshot?: ExecutionSnapshot): Execution {
   const name = ticketWorktreeName(outcome.name ?? '', ticket.id)
   const source = ticket.origin.triggerId
   const note = outcome.note ? `\nRouting note (not the source request): ${outcome.note}` : ''
@@ -108,7 +111,9 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
   const assignment = ticket.mandate.strength === 'inferred' && ruleIds
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
-  const root = executionRoot(settings, stateDir, wsl)
+  if (wsl && !snapshot) throw new Error('WSL ticket metadata requires an already verified execution snapshot')
+  const root = snapshot?.workspaces?.tickets.guestPath ?? snapshot?.target.workspace.guestPath ?? executionRoot(settings, stateDir, wsl)
+  if (wsl && (!root.startsWith('/') || /[\\\x00-\x1f]/.test(root))) throw new Error('Ticket metadata requires a canonical verified guest execution root')
   return { name, directory: wsl ? posix.join(root, name) : join(root, name), assignment }
 }
 /** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
@@ -240,7 +245,7 @@ export class DshExecutor implements Executor {
   }
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text). */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
-    return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir, this.host.machine.wsl) }
+    return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir, this.host.machine.wsl, this.host.executionSnapshot?.()) }
   }
   /**
    * Runs the configured `executor.prepare` command for a new ticket workspace in its parent directory with the ticket's
@@ -418,15 +423,20 @@ export class DshExecutor implements Executor {
     const stop = async () => {
       // This is actual teardown: permanently closing these exact roots' delegation admission is correct here, never on a hand-off.
       const subagents = this.host.context.get('subagents') as { drainDescendants?(parents: readonly Agent[]): Promise<void> } | undefined
+      const failures: unknown[] = []
       try { await subagents?.drainDescendants?.(agents) }
-      catch (error) { this.host.health.set({ state: 'error', detail: `Draining worker descendants during shutdown failed: ${String(error)}`, at: now() }) }
-      await Promise.allSettled(agents.map(agent => stopBackground(this.host.context, agent.id, 'dsh-superagent stopped', true)))
+      catch (error) { failures.push(error) }
+      const backgrounds = await Promise.allSettled(agents.map(agent => stopBackground(this.host.context, agent.id, 'dsh-superagent stopped', true)))
+      for (const result of backgrounds) if (result.status === 'rejected') failures.push(result.reason)
       for (const { collect } of this.left.values()) collect.abort()
       const running = agents.filter(agent => agent.status !== 'idle')
       for (const agent of running) agent.cancel({ kind: 'user' }, { keepInbox: true })
-      await Promise.allSettled(running.map(agent => agent.whenIdle()))
+      const idle = await Promise.allSettled(running.map(agent => agent.whenIdle()))
+      for (const result of idle) if (result.status === 'rejected') failures.push(result.reason)
+      if (failures.length) throw new AggregateError(failures, 'Worker shutdown failed')
+      return true
     }
-    await until(stop(), undefined, SHUTDOWN_STOP_MS)
+    if (!await until(stop(), undefined, SHUTDOWN_STOP_MS)) throw new Error('Worker shutdown timed out; quiescence is not confirmed')
   }
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
   activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length }

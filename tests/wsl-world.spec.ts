@@ -11,13 +11,16 @@ it('maps Linux workspaces to explicit UNC coordinates and refuses another distri
   expect(() => wslWorkspacePath('relative', 'Ubuntu-20.04')).toThrow()
   expect(() => wslWorkspacePath('\\\\wsl.localhost\\Other\\root', 'Ubuntu-20.04')).toThrow(/different/)
 })
-it('keeps Host state separate from the guest orchestrator workspace and refuses drvfs workspace roots', () => {
+it('keeps Host state local and leaves candidate workspace storage classification to verified mapping', () => {
   const configured = machineOf(Config({ stateDir: 'D:\\state', wsl: { distro: 'Ubuntu-20.04', user: 'root', workRoot: '/root/workspace/superagent-tickets' } }))
   expect(orchestratorWorkspace(configured)).toBe('/root/workspace/superagent-tickets/.orchestrator')
   expect(orchestratorWorkspace({ stateDir: '/tmp/native' })).toBe('/tmp/native')
   expect(() => wslWorkspacePath('/mnt/d/state', 'Ubuntu-20.04')).toThrow(/distribution filesystem/)
   expect(() => machineOf(Config({ stateDir: '/state', wsl: configured.wsl }))).toThrow(/Windows drive/)
-  expect(() => machineOf(Config({ stateDir: 'D:\\state', wsl: { ...configured.wsl, workRoot: '/mnt/d/work' } }))).toThrow(/distribution filesystem/)
+  expect(machineOf(Config({ stateDir: 'D:\\state', wsl: { ...configured.wsl, workRoot: '/mnt/d/work' } })).wsl?.workRoot).toBe('/mnt/d/work')
+  expect(machineOf(Config({ stateDir: 'D:\\state', wsl: { ...configured.wsl, workRoot: 'D:\\work' } })).wsl?.workRoot).toBe('D:\\work')
+  // Candidate parsing grants no execution: the legacy UNC-only helper still refuses drvfs,
+  // and the actual mapper tests prove local-disk/identity checks before new-world activation.
 })
 it('isolates sessions, refreshes ticket variables per execution, unsets Host Git state and quotes shell input', () => {
   const original = process.env.PATH

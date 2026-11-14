@@ -1,4 +1,5 @@
 /** Reliable outbound message delivery backed by persistent receipts and retried reply effects. */
+import type { MaintenanceGate } from '../execution/maintenance.ts'
 import type { OutboundMessage, Outbox as OutboxPort, ReplyStatus } from '../core/index.ts'
 import type { Commands } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
@@ -7,6 +8,7 @@ import { FAILURES_BEFORE_ERROR, Later, type Effects } from './effects.ts'
 import type { Store } from './store.ts'
 
 export interface OutboxHost {
+  readonly maintenance?: MaintenanceGate
   readonly store: Pick<Store, 'atomic' | 'receipts'>
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
   readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
@@ -25,6 +27,7 @@ export class Outbox implements OutboxPort {
   }
   /** Record a message receipt and enqueue its delivery effect atomically; duplicate message IDs are ignored. */
   send(message: OutboundMessage): void {
+    this.host.maintenance?.assertOpen()
     // Validate IM reply length here; acknowledgements are already validated when decided.
     if (message.kind === 'reply' && message.channel.source === 'feishu') checkedImText(message.text)
     const { store, effects } = this.host
@@ -37,6 +40,10 @@ export class Outbox implements OutboxPort {
   }
   sent(): Promise<void> { return this.host.effects.idle('reply') }
   private async deliver(id: string): Promise<void> {
+    const release = this.host.maintenance?.admit('outbound', id)
+    try { await this.deliverAdmitted(id) } finally { release?.() }
+  }
+  private async deliverAdmitted(id: string): Promise<void> {
     const { store, sources, commands } = this.host
     const receipt = store.receipts.get(id)
     if (receipt?.status !== 'pending') return

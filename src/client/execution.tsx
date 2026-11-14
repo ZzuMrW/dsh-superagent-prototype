@@ -3,9 +3,11 @@ import { useRef, useState } from 'react'
 import { TICKET_FILTERS, type TicketFilter } from '../app/api.ts'
 import { LIMITS } from '../limits.ts'
 import { usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
-import { DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
+import { Button, DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
+import { settingsRoute } from './route.ts'
 import { SaveBar } from './draft.tsx'
-import { usePanel } from './provider.tsx'
+import { usePanel, usePanelData } from './provider.tsx'
+import { ExecutionPreview, candidateMachine } from './execution-preview.tsx'
 import { TicketLine } from './rows.tsx'
 import { ConfigHistory, Field, Fields, ModelField, numberOf, useBlockDraft, useSettings } from './settings-kit.tsx'
 import { localized } from './text.ts'
@@ -18,9 +20,11 @@ export function ExecutionStatus({ filter: current, state, reload }: {
   const [limit, setLimit] = useState(20)
   const { data, error, reload: reloadTickets } = usePoll(() => call('GET tickets', { query: { state: current, limit } }), [current, limit])
   const { paused, load: { maxWorkers } } = state
+  const safetyHeld = state.executionHold !== undefined ? state.executionHold.length > 0 : state.health.execution?.state === 'paused'
   // Pausing uses its own block revision so toggling pause does not invalidate an open Execution settings draft.
   const pause = async () => { await call('POST executor/pause', { body: { paused: !paused } }); await reload() }
-  const status = state.setup.problem ? { tone: 'warning', label: t('executorWaitingSetup') } : paused ? { tone: 'warning',
+  const status = safetyHeld ? { tone: 'warning', label: t('executionSafetyHeldTitle') }
+    : state.setup.problem ? { tone: 'warning', label: t('executorWaitingSetup') } : paused ? { tone: 'warning',
     label: t('processingPaused') }
     : { tone: 'ongoing', label: t('executorRunning') }
   const action = paused ? 'resumeProcessing' : 'pauseProcessing'
@@ -32,10 +36,15 @@ export function ExecutionStatus({ filter: current, state, reload }: {
         <LabelValue label={t('executingLabel')}
           value={`${state.load.running} / ${maxWorkers}`} /><LabelValue label={t('queuedLabel')} value={state.load.queued} />
       </>}
-      <ConfirmButton variant="outline" icon={paused ? 'play' : 'pause'} label={t(action)} title={t(action)} message={t(paused
+      {(!safetyHeld || !paused) && <ConfirmButton variant="outline" icon={paused ? 'play' : 'pause'} label={t(action)} title={t(action)} message={t(paused
         ? 'resumeProcessingConfirm' : 'pauseProcessingConfirm')}
-        onConfirm={pause} />
+        onConfirm={pause} />}
     </div>
+    {safetyHeld && <div className="dt-row-main" role="status">
+      <Hint>{t('executionSafetyHeldHint')}</Hint>
+      <div className="dt-row-meta"><Button variant="outline" size="sm" icon={<Icon name="settings" size={14} />}
+        onClick={() => navigate(settingsRoute('source'))}>{t('executionSafetyRepair')}</Button></div>
+    </div>}
     <div className="dt-filters">
       {TICKET_FILTERS.map(value => <Pill key={value} active={current === value}
         onClick={() => { setLimit(20); navigate({ page: 'execution', query: value === 'open' ? {} : { filter: value } },
@@ -74,6 +83,7 @@ function EnvironmentVariables({ groups, sources,
 }
 export function ExecutionSettings() {
   const { t } = usePanel()
+  const { setup } = usePanelData()
   const { blocks, environment, sources } = useSettings().settings
   // Keep raw user text (such as separators between blocked commands) in the draft and parse only on save.
   const executor = blocks.executor.value
@@ -105,7 +115,7 @@ export function ExecutionSettings() {
           <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>
           <Field label={t('executionDirectory')} hint={t('executionDirectoryHint')} note={value.directory ? undefined
             : t('executionDirectoryDefault', { root: environment.root })}>
-            <Input className="dt-mono" value={value.directory} placeholder={t('executionDirectoryEmpty')} spellCheck={false} pattern="/.*"
+            <Input className="dt-mono" value={value.directory} placeholder={t('executionDirectoryEmpty')} spellCheck={false}
               onChange={event => edit({ directory: event.target.value })} />
           </Field>
           <Field label={t('prepareCommand')} hint={t('prepareCommandHint')}>
@@ -122,6 +132,8 @@ export function ExecutionSettings() {
       </Fields>
       <SaveBar {...draft} onDiscard={draft.discard} />
     </form>
+    {setup && <ExecutionPreview machine={candidateMachine(setup.machine)} executor={{ directory: value.directory, prepare: value.prepare,
+      blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean) }} />}
     <ConfigHistory blocks={['executor', 'pause']} />
   </div>
 }

@@ -185,6 +185,17 @@ it('lists an Eval past its deadline, and as dsh-superagent\'s own errors only pa
   expect(found.filter(item => item.kind === 'source-error').map(item => item.source.health.name)).toEqual(['feishu', 'history'])
 })
 
+it('shows a safety hold independently of manual pause and never suggests an impossible resume', () => {
+  const host = views(), health = { execution: { state: 'paused' as const, detail: 'Account needs confirmation' } }
+  let found = problems(host, health)
+  expect(found).toContainEqual({ kind: 'execution-held', detail: 'Account needs confirmation' })
+  expect(found.some(item => item.kind === 'executor-paused')).toBe(false)
+  store.saveSettings({ ...store.settings(), paused: true })
+  found = problems(host, health)
+  expect(found.filter(item => item.kind === 'execution-held')).toHaveLength(1)
+  expect(found.some(item => item.kind === 'executor-paused')).toBe(false)
+})
+
 it('says no Source runs when every Source is off, and states a Source missing or off', () => {
   const host = views()
   expect(problems(host).map(item => item.kind)).not.toContain('no-source')

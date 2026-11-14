@@ -3,6 +3,10 @@ import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
+import { WorkspacePathMapper } from '../execution/path-mapper.ts'
+import { probeHostPath } from '../execution/host-path.ts'
+import type { MaintenanceGate } from '../execution/maintenance.ts'
+import type { ExecutionSnapshot } from '../execution/target.ts'
 import type { Deployment } from '../deployment.ts'
 import { runWsl, guestPath } from './wsl.ts'
 
@@ -62,18 +66,28 @@ export class Commands {
    * @param resolved - returns the resolved deployment setup, or throws while setup is still pending.
    * @param environment - variables overriding `process.env` for every command (such as isolated git settings).
    */
-  constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal) {}
+  constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined> | (() => Record<string, string | undefined>), private readonly signal: AbortSignal, private readonly maintenance?: MaintenanceGate, private readonly snapshot?: () => ExecutionSnapshot | undefined, private readonly onCleanupUnconfirmed?: () => void) {}
   get deployment(): Deployment { return this.resolved() }
   get repository(): string { return this.deployment.repository }
-  withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
+  withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal]), this.maintenance, this.snapshot, this.onCleanupUnconfirmed) : this }
   async run(program: string, args: string[], cwd?: string): Promise<string> {
+    const release = this.maintenance?.admit('effect', 'command')
     try {
-      if (this.deployment.wsl) return await runWsl(this.deployment, { argv: [program, ...args], cwd: cwd ? guestPath(this.deployment, cwd) : '/',
-        env: { ...this.environment, GH_PROMPT_DISABLED: '1' }, signal: this.signal, timeoutMs: TIMEOUT_MS })
+      const environment = typeof this.environment === 'function' ? this.environment() : this.environment
+      const snapshot = this.snapshot?.()
+      const machine = this.deployment
+      const directory = snapshot && cwd ? await new WorkspacePathMapper(snapshot.target, {
+        guest: (argv, signal) => runWsl(machine, { argv, cwd: '/', expectedIdentity: snapshot.target, signal, timeoutMs: TIMEOUT_MS }), host: probeHostPath,
+      }).guestPath(cwd, snapshot.target.workspace.guestPath, this.signal) : cwd ? guestPath(machine, cwd) : '/'
+      if (machine.wsl) return await runWsl(machine, { argv: [program, ...args], cwd: directory,
+        ...snapshot ? { expectedIdentity: snapshot.target } : {}, env: { ...environment, GH_PROMPT_DISABLED: '1' }, signal: this.signal, timeoutMs: TIMEOUT_MS })
       const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env, ...this.environment, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
+        env: { ...process.env, ...environment, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
       return stdout
-    } catch (error) { throw commandError(error, program) }
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === 'WSL_CLEANUP_UNCONFIRMED') this.onCleanupUnconfirmed?.()
+      throw commandError(error, program)
+    } finally { release?.() }
   }
   /** Runs the agent's GitHub CLI and parses its JSON output; callers should prefer `api`, which is restricted to the configured repository and validates output. */
   async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.deployment.github.cli, args)) as T }

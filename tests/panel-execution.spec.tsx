@@ -40,6 +40,21 @@ it('lists Tickets under Execution by who they wait on, with the Executor state a
   expect(server.settings).toMatchObject({ paused: true, executor: { maxWorkers: 4 } })
 })
 
+it('shows a safety hold separately from manual pause and never offers a blocked resume', async () => {
+  server.health.execution = { state: 'paused', detail: 'Account identity needs confirmation' }
+  await mount(); await click(zh['tab.execution'])
+  expect(text()).toContain(zh.executionSafetyHeldTitle)
+  expect(text()).not.toContain(zh.executorRunning)
+  expect(find(zh.pauseProcessing)).toBeTruthy()
+  await click(zh.pauseProcessing); await click(zh.confirm)
+  expect(server.settings.paused).toBe(true)
+  expect(text()).toContain(zh.executionSafetyHeldTitle)
+  expect(all('button').some(button => button.textContent === zh.resumeProcessing)).toBe(false)
+  await click(zh.executionSafetyRepair)
+  expect(tab(zh['tab.settings']).getAttribute('aria-selected')).toBe('true')
+  expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['tab.source'])
+})
+
 it('stops an open Ticket from its page after confirmation', async () => {
   await mount()
   await click('修复回归')

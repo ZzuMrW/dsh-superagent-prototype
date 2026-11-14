@@ -80,7 +80,7 @@ async function start() {
     [`git -C ${directory} rev-parse --show-toplevel`]: `${directory}\n`,
     [`git -C ${directory} remote get-url --push origin`]: 'https://github.com/acme/widgets.git\n',
     [`${AGENT} api user`]: '{"login":"agent-bot","id":7}',
-    [`${AGENT} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`]: '{"name":"acme/widgets","push":true}\n',
+    [`${AGENT} api repos/acme/widgets --jq {id: .id, name: .full_name, push: .permissions.push}`]: '{"id":42,"name":"acme/widgets","push":true}\n',
     [`${BOT} auth status`]: JSON.stringify({ appId: 'cli_bot', brand: 'feishu', identities: { bot: { status: 'ready' } } }),
     [`${BOT} config strict-mode`]: 'strict-mode: bot (source: profile)',
     [`${BOT} api GET /open-apis/bot/v3/info --as bot --format ndjson`]: '{"bot":{"open_id":"ou_bot"},"code":0,"msg":"ok"}',
@@ -125,7 +125,10 @@ async function start() {
     }
     const session = { id: sessionId, snapshotEvents: () => [], requestHeader: () => undefined, append: () => {} }
     agents.set(sessionId, { id: sessionId, ctx: agentCtx, inbox, followup: deliver(inbox.nextTurn), steer: deliver(inbox.nextStep),
-      inject: record, status: 'idle', cancel: () => {}, whenIdle: async () => {}, session } as never)
+      inject: record, status: 'idle', cancel: (_cause?: unknown, options?: { keepInbox?: boolean }) => {
+        agents.get(sessionId)!.status = 'idle'
+        if (!options?.keepInbox) { inbox.nextTurn.splice(0); inbox.nextStep.splice(0) }
+      }, whenIdle: async () => {}, session } as never)
   }
   const resolveAgent = async (id: string) => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }
   const ctx = new Context()
@@ -142,12 +145,16 @@ async function start() {
   seed.close()
   const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), () => {})
   await runtime.ready
+  expect(runtime.setup.problem).toBeUndefined()
+  expect(runtime.maintenance.blockers()).toEqual([])
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
   const settings = runtime.store.settings()
   const allowed = { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } }
   const feishuSource = { enabled: true, config: { cli: BOT, chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } }
   runtime.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: allowed }, eval: { ...settings.eval, mode: 'auto' },
     sources: { ...settings.sources, feishu: feishuSource } })
+  // Source registration synchronizes policy asynchronously; exercise the model only after that maintenance commit settles.
+  await vi.waitFor(() => expect(runtime.maintenance.blockers()).toEqual([]))
   const run = async (sessionId: string, name: string, args: unknown) =>
     await tools.get(sessionId)!.get(name)!.execute(args, { signal: new AbortController().signal }) as Record<string, unknown>
   const stop = async () => { await runtime.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) }

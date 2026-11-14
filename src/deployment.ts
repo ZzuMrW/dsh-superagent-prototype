@@ -9,6 +9,7 @@ import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
 import { SetupError } from './setup.ts'
 import { resolveWslExecutable } from './infra/wsl.ts'
+import { validateRequestedTarget } from './execution/target.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
 const absolute = (description: string) => s.string().pattern(/^(?:\/|[A-Za-z]:[\\/]|\\\\)/).description(`${description} Absolute Host path.`)
@@ -25,9 +26,9 @@ export interface DeploymentConfig {
 export const Config: Schemastery<Record<string, unknown>, DeploymentConfig> = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
   wsl: s.union([s.const(false), s.object({
-    distro: s.string().pattern(/^[A-Za-z0-9._-]+$/).required(),
-    user: s.string().pattern(/^[A-Za-z0-9_-]+$/).required(),
-    workRoot: s.string().pattern(/^\//).required(),
+    distro: s.string().required(),
+    user: s.string().required(),
+    workRoot: s.string().required(),
   })]).default(false).description('Optional Windows Host execution target. False keeps native execution; otherwise repository commands run in this WSL distribution/user.'),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),
@@ -55,8 +56,9 @@ export function machineOf(config: DeploymentConfig): Machine {
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
   const { stateDir, wsl, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
   if (wsl && !/^[A-Za-z]:[\\/]/.test(stateDir)) throw new Error('WSL mode stateDir must be an absolute local Windows drive path, not POSIX or UNC')
-  if (wsl && /^\/mnt\/[A-Za-z](?:\/|$)/.test(wsl.workRoot)) throw new Error('WSL workRoot must be in the distribution filesystem, not /mnt/<drive>')
-  return { stateDir, ...(wsl ? { wsl } : {}), promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  // Syntax is not locality: real wslpath, mount evidence and Host registration are checked at explicit startup/apply.
+  const requested = wsl ? validateRequestedTarget(wsl) : undefined
+  return { stateDir, ...(requested ? { wsl: requested } : {}), promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
 }
 
 export const GithubAccountsSchema = z.object({
@@ -69,6 +71,8 @@ export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { githu
 
 export interface Deployment extends Machine {
   repository: string
+  userId: string
+  repoId: string
   github: { cli: string; login: string; noreply: string }
   feishu?: FeishuBot
 }
@@ -89,11 +93,11 @@ export type Probe = (argv: string[]) => Promise<string>
 /** Run startup checks through DSH's worker subprocess service with worker shims removed from PATH so a `gh` wrapper script reaches the real binary. */
 export function workerProbe(subprocess: SubprocessRuntime, stateDir: string, cwd: string, signal: AbortSignal): Probe {
   const path = withoutDirectory(process.env.PATH ?? '', workerBin(stateDir))
-  return argv => runAsWorker(subprocess, ['env', `PATH=${path}`, ...argv], cwd, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))
+  return argv => runAsWorker(subprocess, ['env', `PATH=${path}`, 'GH_HOST=', 'GH_CONFIG_DIR=', 'XDG_CONFIG_HOME=', 'GH_PROMPT_DISABLED=1', ...argv], cwd, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))
 }
 
 const GithubUser = z.object({ login: z.string().regex(/^[A-Za-z0-9-]+$/), id: z.number().int().positive() })
-const RepositoryAccess = z.object({ name: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), push: z.boolean().nullable() })
+const RepositoryAccess = z.object({ id: z.number().int().positive(), name: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), push: z.boolean().nullable() })
 function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   let value: unknown
   try { value = JSON.parse(text) } catch { return undefined /* Non-JSON output; the caller surfaces the setup failure. */ }
@@ -109,17 +113,24 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   if (!accounts.cli) throw new SetupError('agentCliUnset')
   let cli: string
   try { cli = machine.wsl ? await resolveWslExecutable(machine, accounts.cli, probe) : executable(accounts.cli, path, workerBin(stateDir)) } catch (error) { throw new SetupError('agentCliMissing', { output: reason(error) }) }
+  if (machine.wsl) {
+    try {
+      const native = (await probe(['python3', '-c', 'import os,sys\np=os.path.realpath(sys.argv[1])\nwith open(p,"rb") as f: magic=f.read(2)\nif magic==b"MZ" or p.lower().endswith((".exe",".cmd",".bat")) or not os.access(p,os.X_OK): sys.exit(1)\nprint(p)', cli])).trim()
+      if (!native.startsWith('/') || /[\x00-\x1f\x7f]/.test(native)) throw new Error('Invalid native CLI')
+      cli = native
+    } catch { throw new SetupError('agentCliMissing', { output: 'The selected CLI must be an executable guest-native program or wrapper' }) }
+  }
   const text = await probe([cli, 'api', 'user']).catch((error: unknown) => { throw new SetupError('agentCliSignedOut', { output: reason(error) }) })
   const agent = parsed(GithubUser, text)
   if (!agent) throw new SetupError('agentCliNoAccount')
   // Use the canonical repository name returned by GitHub so renamed repositories match incoming notifications.
-  const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
+  const access = parsed(RepositoryAccess, await probe([cli, 'api', `repos/${remote}`, '--jq', '{id: .id, name: .full_name, push: .permissions.push}']).catch((error: unknown) => {
     throw new SetupError('repositoryUnreadable', { account: agent.login, repository: remote, output: reason(error) })
   }))
   if (!access) throw new SetupError('repositoryUnreported', { repository: remote })
   const repository = access.name
   if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
-  return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+  return { ...machine, repository, userId: String(agent.id), repoId: String(access.id), github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })

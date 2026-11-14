@@ -2,6 +2,8 @@
  * Typed key-value store keys and key families grouped by the single component that owns and writes each family.
  * Readers and writers refer to a record by its entry here so each key is spelled once with its value type.
  */
+import type { AcceptedAccountBinding } from './app/account-binding.ts'
+import type { ExecutionSnapshot } from './execution/target.ts'
 import type { PromptVersion } from './app/prompts.ts'
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
@@ -30,7 +32,12 @@ export const KV = {
     /** The built-in text of a prompt part an override was edited from, by its `base`, which shows what an upgrade changed. */
     builtIn: family<string, [base: string]>('prompt-built-in:') },
   /** Runtime: the main Session's ID. */
-  runtime: { masterId: record<string>('master-id') },
+  runtime: { masterId: record<string>('master-id'),
+    /** Fail-closed across process/module restarts; only manual verification may authorize external removal. */
+    executionCleanup: record<{ code: 'guest-cleanup-unconfirmed'; at: string; sessionIds: string[] }>('execution-cleanup') },
+  accounts: { accepted: record<AcceptedAccountBinding>('accounts-accepted'), deploymentId: record<string>('deployment-id'),
+    execution: record<ExecutionSnapshot>('execution-snapshot'), generation: record<number>('environment-revision'),
+    activation: record<{ revision: number; bindingRevision: number; directory?: string; generationId?: string }>('environment-activation') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */
@@ -43,11 +50,11 @@ export const KV = {
    * per-stream cursor, start times by kind, and ETag; default-branch CI state; and per-PR CI fingerprint and revision (`revision`
    * counts reported CI changes so each produces a distinct Trigger ID).
    */
-  github: { since: record<string>('github-since'), retries: record<Record<string, Retry>>('github-retry'),
+  github: { cutoff: record<string>('github-cutoff'), ciBaseline: record<string>('github-ci-baseline'), since: record<string>('github-since'), retries: record<Record<string, Retry>>('github-retry'),
     cursor: family<string, [number: number]>('github-cursor:'),
     stream: family<{ since: string; started: Record<string, string>; etag?: string }, [stream: string]>('github-stream:'),
-    branchCi: record<{ branch?: string; failures?: string[]; revision: number }>('github-branch-ci'),
-    ci: family<{ fingerprint: string; revision: number }, [number: number]>('github-ci:') },
+    branchCi: record<{ branch?: string; failures?: string[]; revision: number; baseline?: string }>('github-branch-ci'),
+    ci: family<{ fingerprint: string; revision: number; baseline?: string }, [number: number]>('github-ci:') },
   /**
    * Feishu Source: known chats (`true` for direct messages); per-chat history cursor and active topics mapped from topic ID
    * to last-seen timestamp; and per-polled-thread seen message IDs and initialization flag.

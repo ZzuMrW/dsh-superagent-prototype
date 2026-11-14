@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Superagent · WSL 本地适配",
-    "description": "上游研究原型的本地实验适配版：Windows 宿主管理 GitHub 工单，命令与工作区转接到指定 WSL。须配置专用账号和白名单；不启用飞书。仅针对 DSH 0.2.2-rc.3 与 WSL 工作区插件 0.7.13，实际验证范围见随包 WSL-ADAPTER 说明。"
+    "description": "面向 DSH 0.2.2-rc.3 的 Windows 宿主／指定用户 WSL 实验适配。单个自包含包提供运行时、客户端、受管工作区文件、指令和技能。源码包默认禁用；本机配置包仅显式启用运行时，不启动 GitHub 轮询或恢复 processing。使用前须配置并确认账号身份与仓库白名单。不启用飞书或 WSL 子代理／workflow 委派；验证限制见随包 WSL-ADAPTER 说明。"
   }
 }

@@ -1,4 +1,5 @@
 /** Block-scoped settings validation, optimistic concurrency saves, processing pause control, and source policy synchronization. */
+import type { MaintenanceGate } from '../execution/maintenance.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { UserError, type EngineForSettings } from '../core/index.ts'
@@ -54,6 +55,8 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
 
 /** Host dependencies used by `Settings`. */
 export interface SettingsHost {
+  readonly maintenance?: MaintenanceGate
+  checkEnvironmentChange?(candidate: SettingsValue): Promise<void>
   readonly store: Pick<Store, 'settings' | 'saveSettings' | 'blockRevision' | 'atomic' | 'tickets' | 'get'>
   readonly sources: SourceRegistry
   /** Notified when a settings save changes the policy version. */
@@ -146,6 +149,7 @@ export class Settings {
    * @throws UserError | z.ZodError when `block` is unknown, the source is not installed, `value` is invalid (such as an `executor` block carrying `paused`, which only `pause` sets), a non-panel `origin` changes panel-only fields, or a role-model or account check fails.
    */
   async save(block: SettingsBlock, value: unknown, revision: number, origin: SettingsOrigin) {
+    this.host.lifetime.throwIfAborted()
     const { store, sources, engine, sessions } = this.host
     const stale = () => revision !== store.blockRevision(block)
     if (stale()) throw new SettingsConflict('Settings changed. Reload before saving.')
@@ -163,36 +167,47 @@ export class Settings {
       try { await resolveRoleModel(this.host.context, model) }
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
+    this.host.lifetime.throwIfAborted()
     rules.guard?.(current, candidate, origin)
+    const environmentChanged = setupChanged(current, candidate) || environment(current) !== environment(candidate)
+    const requiresExclusive = environmentChanged || !this.host.setup.configured() && JSON.stringify(SettingsSchema.parse(candidate)) !== JSON.stringify(current)
+    if (requiresExclusive) await this.host.checkEnvironmentChange?.(candidate)
     if (setupChanged(current, candidate)) await this.host.setup.checkAccounts(block, candidate)
+    this.host.lifetime.throwIfAborted()
     if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
-    // Re-read current settings after async checks in case unrelated blocks were saved concurrently.
-    const old = store.settings()
-    const settings = rules.merge(old, parsed, id)
-    if (JSON.stringify(SettingsSchema.parse(settings)) === JSON.stringify(old)) {
-      const delivery = await sessions.delivery(`settings:${block}`)
-      return { saved: true, revision: store.blockRevision(block), policy_changed: false, restarting: false, context_delivery: delivery }
+    // Validation may run concurrently, but actual saves cannot cross an account application.
+    const commit = async () => {
+      this.host.lifetime.throwIfAborted()
+      if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
+      if (requiresExclusive) await this.host.checkEnvironmentChange?.(candidate)
+      this.host.lifetime.throwIfAborted()
+      if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
+      const old = store.settings()
+      const settings = rules.merge(old, parsed, id)
+      if (JSON.stringify(SettingsSchema.parse(settings)) === JSON.stringify(old)) {
+        return { saved: true, revision: store.blockRevision(block), policy_changed: false, restarting: false }
+      }
+      const restarting = setupChanged(old, settings) || environment(old) !== environment(settings) || !this.host.setup.configured()
+      const before = policyVersion(old), after = policyVersion(settings)
+      const scope = (version: SettingsValue) => ({ scope: (input: { source: string; meta: Record<string, unknown> }) => this.host.sources.scope(input, version) })
+      const effects = before === after ? new Map() : policyEffects(store.tickets.open(), old, SettingsSchema.parse(settings), scope)
+      const notified = [...effects.keys()]
+      store.atomic(() => {
+        store.saveSettings(SettingsSchema.parse(settings), { source: origin, block, policyVersion: after, policyChanged: before !== after, notified })
+        if (origin !== 'tool') sessions.notify(...settingsNotice(block, changedPaths(old, settings)))
+        if (before !== after) engine.policyChanged(before, after, effects)
+      })
+      if (restarting) this.host.maintenance?.hold('settings-restart', { code: 'settings-restart-pending' })
+      return { saved: true, revision: store.blockRevision(block), policy_changed: before !== after, restarting }
     }
-    const restarting = setupChanged(old, settings) || !this.host.setup.configured()
-    const before = policyVersion(old), after = policyVersion(settings)
-    const scope = (version: SettingsValue) => ({
-      scope: (input: { source: string; meta: Record<string, unknown> }) => this.host.sources.scope(input, version) })
-    const effects = before === after ? new Map() : policyEffects(store.tickets.open(), old, SettingsSchema.parse(settings), scope)
-    const notified = [...effects.keys()]
-    store.atomic(() => {
-      store.saveSettings(SettingsSchema.parse(settings), { source: origin, block, policyVersion: after, policyChanged: before !== after, notified })
-      if (origin !== 'tool') sessions.notify(...settingsNotice(block, changedPaths(old, settings)))
-      if (before !== after) engine.policyChanged(before, after, effects)
-    })
-    // Rewrite worker command shims immediately when `blockedCommands` changes.
-    const blocked = settings.executor.blockedCommands
-    const changed = blocked.join(' ') !== old.executor.blockedCommands.join(' ')
-    if (changed) await this.host.setup.blockCommands(blocked)
-    // When restarting, the notice stays pending until after the restart; `setup.restart()` defers until this call returns.
-    const delivery = restarting ? 'pending' : await sessions.delivery(`settings:${block}`)
-    if (restarting) this.host.setup.restart()
+    // Metadata saves share the identity mutex, but do not create spurious business-admission holds during policy sync.
+    const result = this.host.maintenance ? requiresExclusive
+      ? await this.host.maintenance.exclusive('settings-environment-save', commit)
+      : await this.host.maintenance.serialize('settings-metadata-save', commit) : await commit()
+    const delivery = result.restarting ? 'pending' : await sessions.delivery(`settings:${block}`)
+    if (result.restarting) this.host.setup.restart()
     else this.host.requestPass()
-    return { saved: true, revision: store.blockRevision(block), policy_changed: before !== after, restarting, context_delivery: delivery }
+    return { ...result, context_delivery: delivery }
   }
   /**
    * Pauses or resumes processing (new evaluations, worker dispatch, and channel delivery, while Sources continue recording
@@ -200,6 +215,8 @@ export class Settings {
    * @returns Whether processing is now paused (`{ paused }`).
    */
   async pause(paused: boolean, origin: SettingsOrigin): Promise<{ paused: boolean }> {
+    this.host.lifetime.throwIfAborted()
+    if (!paused) this.host.maintenance?.assertOpen()
     const { store, sessions } = this.host
     const old = store.settings()
     if (old.paused === paused) return { paused }
@@ -229,6 +246,7 @@ export class Settings {
    * @throws UserError (`nothingToSync`) when `id` cannot sync now, `SettingsConflict` if the `'policy'` block changed during synchronization, or the underlying sync error on failure.
    */
   async sync(id: string) {
+    this.host.lifetime.throwIfAborted()
     const { store, sources } = this.host
     if (!this.syncable().includes(id)) throw new UserError('nothingToSync', { source: id })
     const health = this.syncHealth(id)

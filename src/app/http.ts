@@ -3,6 +3,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { z } from 'zod'
+import type { AccountApplyResult, AccountRefreshResult, AccountBlockers } from './account-refresh.ts'
+import { createExecutionRuntime } from './execution-runtime.ts'
+import { previewDeployment } from '../execution/preview.ts'
+import './execution-api.ts'
+import { MaintenanceBlockedError, type MaintenanceGate } from '../execution/maintenance.ts'
+import './account-refresh-api.ts'
 import { THREAD_FILTERS, TICKET_FILTERS, type Api, type ApiResponse, type RouteParams } from './api.ts'
 import { sourceSkills } from './context.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
@@ -29,6 +35,12 @@ import { decisionList, search, threadDetail, threadList } from './views/threads.
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 
 export interface HttpHost {
+  readonly accounts?: { refresh(): Promise<AccountRefreshResult>; apply(token: string, confirmed: boolean): Promise<AccountApplyResult> }
+  readonly maintenance?: MaintenanceGate
+  accountBlockers?(): AccountBlockers
+  readonly lifetime?: AbortSignal
+  trackDiagnostic?<T>(work: () => Promise<T>): Promise<T>
+  recordExecutionCleanup?(sessionIds?: readonly string[]): void
   readonly store: Store
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
@@ -86,12 +98,13 @@ function failure(error: unknown): [number, Record<string, unknown>] {
   if (error instanceof SetupError) return [400, { error: error.message, setup: error.problem }]
   if (error instanceof RouteError) return [error.status, { error: error.message }]
   if (error instanceof UserError) return [error.missing ? 404 : 400, { error: error.message, code: error.code, values: error.values }]
+  if (error instanceof MaintenanceBlockedError) return [409, { error: 'Managed execution is held for maintenance or identity confirmation', blockers: error.blockers }]
   if (error instanceof SettingsConflict || error instanceof PromptConflict) return [409, { error: error.message }]
   return [500, { error: error instanceof Error ? error.message : String(error) }]
 }
 
-function machineView({ stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }: Machine) {
-  return { stateDir, promptMaxChars: promptMaxChars.get(), admissionContextMaxPages: admissionContextMaxPages.get(),
+function machineView({ stateDir, wsl, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }: Machine) {
+  return { stateDir, wsl: wsl ? { ...wsl } : false as const, promptMaxChars: promptMaxChars.get(), admissionContextMaxPages: admissionContextMaxPages.get(),
     admissionContextTimeoutMs: admissionContextTimeoutMs.get() }
 }
 function setupView(runtime: HttpHost) {
@@ -106,7 +119,8 @@ export function stateView(runtime: HttpHost) {
   const settings = runtime.store.settings()
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
     maxWorkers: settings.executor.maxWorkers },
-    masterId: runtime.masterId, paused: settings.paused, health: runtime.health }
+    masterId: runtime.masterId, paused: settings.paused, health: runtime.health,
+    ...runtime.maintenance ? { executionHold: runtime.maintenance.blockers() } : {} }
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
@@ -150,6 +164,16 @@ const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().no
 
 function routes(runtime: HttpHost): Routes {
   const { store } = runtime
+  const execution = runtime.lifetime && runtime.trackDiagnostic && runtime.recordExecutionCleanup ? createExecutionRuntime({
+    machine: runtime.machine, savedSettings: () => store.settings(), lifetime: runtime.lifetime,
+    track: work => runtime.trackDiagnostic!(work), onCleanupUnconfirmed: () => { runtime.recordExecutionCleanup!() },
+    ...runtime.maintenance && runtime.accountBlockers ? { withWriteProbe: <T>(work: () => Promise<T>) => runtime.maintenance!.exclusive('deployment-write-probe', async () => {
+      const state = runtime.accountBlockers!()
+      const blockers = [...state.items, ...state.paused ? [] : [{ code: 'pause-required', detail: 'Pause processing before a mutating diagnostic' }]]
+      if (blockers.length) throw new MaintenanceBlockedError(blockers)
+      return work()
+    }) } : {},
+  }) : undefined
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
@@ -158,7 +182,21 @@ function routes(runtime: HttpHost): Routes {
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
+    'POST deployment/preview': async ({ body }) => previewDeployment(await body(512 * 1024)),
+    'POST deployment/diagnose': async ({ body }) => {
+      if (!execution) throw new RouteError(404, 'Deployment diagnostics require a tracked runtime')
+      return execution.diagnose(await body(512 * 1024))
+    },
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir, runtime.machine.wsl),
+    'POST sources/:id/accounts/refresh': ({ params }) => {
+      if (params.id !== 'github') throw new RouteError(404, 'Account refresh is unavailable for this Source')
+      return runtime.accounts?.refresh() ?? { ok: false, status: 'unavailable', code: 'probe-failed' }
+    },
+    'POST sources/:id/accounts/apply': async ({ params, body }) => {
+      if (params.id !== 'github') throw new RouteError(404, 'Account refresh is unavailable for this Source')
+      const request = z.object({ planToken: z.string().min(1).max(256), confirmed: z.literal(true) }).strict().parse(await body(4096))
+      return runtime.accounts?.apply(request.planToken, request.confirmed) ?? { ok: false, status: 'unavailable', code: 'probe-failed' }
+    },
     'POST sources/:id/labels': ({ params }) => runtime.settings.refreshLabels(params.id),
     'GET threads': ({ query }) => {
       const { filter, offset, limit } = ThreadsQuery.parse(query)
@@ -241,6 +279,9 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')
         const query = Object.fromEntries(url.searchParams)
+        if (req.method !== 'GET' && !url.pathname.endsWith('/accounts/refresh') && !url.pathname.endsWith('/accounts/apply')
+          && !url.pathname.includes('/settings/') && !url.pathname.endsWith('/executor/pause')
+          && !url.pathname.endsWith('/deployment/preview') && !url.pathname.endsWith('/deployment/diagnose')) runtime.maintenance?.assertOpen()
         json(res, 200, await route.run({ params: route.params as never, query, body: maxBytes => readBody(req, maxBytes) }))
       } catch (error) { json(res, ...failure(error)) }
     } })]

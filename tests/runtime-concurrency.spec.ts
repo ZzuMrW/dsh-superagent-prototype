@@ -902,6 +902,12 @@ describe('the Executor\'s parts', () => {
     expect(execution.assignment).not.toContain(mandateInstructions(ticket.mandate))
     expect(execution.assignment).toContain('- Copy fixes (copy): Fix typos only.')
     expect(mandateInstructions({ strength: 'explicit' })).toBe('')
+    const wsl = { distro: 'Test', user: 'selected', workRoot: 'D:\\raw-default' }
+    const changed = { ...settings, executor: { ...settings.executor, directory: 'E:\\raw-tickets' } }
+    const outcome = { kind: 'accept', title: 'Fix', scope: 'the typo', reason: 'r', name: 'fix-typo' } as never
+    expect(() => ticketExecution(ticket, outcome, changed, 'C:\\host-state', wsl)).toThrow('verified execution snapshot')
+    const pinned = { target: { workspace: { guestPath: '/custom/tickets' } } } as never
+    expect(ticketExecution(ticket, outcome, changed, 'C:\\host-state', wsl, pinned).directory).toBe('/custom/tickets/fix-typo-ticket-01234')
   })
   it('renders each kind of Input as its worker reads it, inline, and no reopen Input', () => {
     const asked = { id: 'tr1', source: 'feishu', threads: [{ source: 'feishu', id: 'oc:om_1' }], actor: { source: 'feishu', id: 'ou_a' }, human: true,

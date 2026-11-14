@@ -19,9 +19,17 @@ import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
 import type { RegisterTool, Tool } from './tools/tool.ts'
-import { registerWslExecution, wslExecutionFor, wslWorkspacePath, type WslExecutionBinding } from './wsl-world.ts'
-import { guestPath } from '../infra/wsl.ts'
-import { assertWslShellHealthy } from '../wsl-shell.ts'
+import { registerWslExecution, wslExecutionFor, type WslExecutionBinding } from './wsl-world.ts'
+import { assertWslShellHealthy, disposeWslShellExecutions } from '../wsl-shell.ts'
+import { SessionExecutionOwner, sessionExecutionKey, masterWorkspace } from '../execution/session-world.ts'
+import { SessionExecutionRegistry, type SessionExecutionRecord } from '../execution/registry.ts'
+import { WorkspacePathMapper, GUEST_PATH_FACTS, type GuestPathFacts } from '../execution/path-mapper.ts'
+import { configureGuestFsResolver, withGuestFsSession } from '../wsl-fs.ts'
+import { configureWorkspaceSessionRegistry } from '../workspace-files.ts'
+import { runWsl } from '../infra/wsl.ts'
+import { killJobs } from '../executor/background.ts'
+import type { MaintenanceGate } from '../execution/maintenance.ts'
+import { runningJobs } from '../executor/background.ts'
 
 /** Host dependencies used by `Sessions`. */
 export interface SessionsHost {
@@ -34,8 +42,11 @@ export interface SessionsHost {
   readonly health: HealthEntry
   readonly masterId: string
   readonly lifetime: AbortSignal
+  readonly maintenance?: MaintenanceGate
   /** Configured guest environment, read lazily after Setup completes. */
   executionBinding?(): WslExecutionBinding | undefined
+  /** Persist only positively unconfirmed guest cleanup, never ordinary tool failures. */
+  recordExecutionCleanup?(sessionIds?: readonly string[]): void
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
@@ -103,9 +114,37 @@ export class Sessions {
   private readonly bindings = new Map<Agent, SessionBinding>()
   private readonly retryHealth = new RetryHealth()
   private readonly ctx: Context
+  private readonly executions: SessionExecutionOwner
+  private readonly executionIds = new Set<string>()
+  private shutdownPromise?: Promise<void>
+  private disposed = false
+  readonly executionRegistry: SessionExecutionRegistry
+  private readonly releaseGuestResolver: () => void
+  private readonly releaseWorkspaceRegistry: () => void
+  private readonly turns = new Map<string, () => void>()
   /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
   constructor(private readonly host: SessionsHost) {
     this.ctx = host.context
+    this.executions = new SessionExecutionOwner(host.maintenance, ids => host.recordExecutionCleanup?.(ids))
+    this.executionRegistry = new SessionExecutionRegistry({
+      load: id => host.store.get(sessionExecutionKey(id)),
+      isManagedSession: id => !!host.executionBinding?.()?.machine.wsl && (id === host.masterId || !!host.store.tickets.get(ticketOfSession(id) ?? '')),
+      isCurrent: record => {
+        const current = host.executionBinding?.()?.snapshot
+        return !!current && current.target.id === record.snapshot.target.id && current.target.generationId === record.snapshot.target.generationId
+      },
+    })
+    this.releaseWorkspaceRegistry = configureWorkspaceSessionRegistry(this.executionRegistry, record => this.executionFor(record))
+    this.releaseGuestResolver = configureGuestFsResolver(async id => {
+      if (!id) return undefined
+      const found = await this.executionRegistry.lookup(id)
+      if (found.kind !== 'managed') return undefined
+      const binding = this.executionFor(found.record)
+      return { identity: `${found.record.snapshot.target.id}:${found.record.snapshot.target.generationId}`, cwd: found.record.guestCwd,
+        assertCurrent: binding.assertCurrent,
+        mapPath: (input, cwd) => binding.mapPath!(input, undefined, cwd),
+        transport: (script, payload, signal, maxBytes) => this.dispatchGuest(found.record, ['python3', '-c', script], payload, signal, maxBytes) }
+    })
     this.agentDelivery = new AgentDelivery(host.context)
     // Deliver relays and notices to the main Session in the order they were queued.
     host.effects.handle('relay', ({ text }, requestId) => this.prompt(host.masterId, requestId, text, 'steer'), { ordered: true })
@@ -114,6 +153,18 @@ export class Sessions {
   /** Subscribes to host agent and session events so newly created sessions are decorated and model-budget retries are reflected in health. Call once at startup. */
   install(): void {
     const ctx = this.ctx
+    ctx.on('agent/pre-step', ({ agent }, next) => {
+      if (!this.managed(agent.id)) return next()
+      this.executions.assertOpen()
+      return withGuestFsSession(agent.id, next)
+    })
+    ctx.on('tools/execute', (execution, next) => {
+      const id = execution.agent?.id
+      if (!id || !this.managed(id)) return next()
+      this.executions.assertOpen()
+      const release = this.host.maintenance?.admit('effect', `${id}/${execution.name}`)
+      return withGuestFsSession(id, async () => { try { return await next() } finally { release?.() } })
+    })
     ctx.on('agent/disposed', ({ agent }) => {
       this.release(agent)
       this.retryHealth.clear(agent.id); this.updateModelHealth()
@@ -125,11 +176,12 @@ export class Sessions {
       this.retryHealth.observe(agent.id, event)
       this.updateModelHealth()
     })
-    ctx.on('agent/created', async ({ agent }) => { await this.decorate(agent); return undefined })
+    ctx.on('agent/created', async ({ agent }) => { if (!this.disposed && !this.host.closing()) await this.decorate(agent); return undefined })
     // Opening a Session in DSH's Web UI before its first turn may select the default preset for it: select ours again. After
     // its first turn DSH refuses any selection, which leaves it as it is.
     ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
+        if (this.disposed || this.host.closing()) return
         const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
         const ours = sessionId === this.host.masterId ? this.preset('orchestrator') : ticketId && this.host.store.tickets.get(ticketId) ? this.preset('worker') : undefined
         if (!ours || preset === ours || !agent) return
@@ -138,15 +190,47 @@ export class Sessions {
       })
     })
     ctx.on('agent/status', ({ agent, status }) => {
+      if (this.managed(agent.id)) {
+        this.turns.get(agent.id)?.(); this.turns.delete(agent.id)
+        if (status === 'running') {
+          try { this.executions.assertOpen(); const release = this.host.maintenance?.admit('turn', agent.id); if (release) this.turns.set(agent.id, release) }
+          catch { agent.cancel({ kind: 'user' }, { keepInbox: true }) }
+        }
+      }
       if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
     })
   }
   /** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, sets `danger-full-access` permissions, and renames it to `title`. */
   async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker'): Promise<Agent> {
+    this.executions.assertOpen()
     const ctx = this.ctx
     const execution = this.host.executionBinding?.()
     if (execution?.machine.wsl) assertWslShellHealthy(id)
-    const workspaceCwd = execution?.machine.wsl ? wslWorkspacePath(guestPath(execution.machine, cwd), execution.machine.wsl.distro) : cwd
+    let workspaceCwd = cwd
+    let record: SessionExecutionRecord | undefined
+    if (execution?.machine.wsl) {
+      const snapshot = execution.snapshot
+      if (!snapshot) throw new Error('WSL Session requires a verified execution snapshot')
+      const header = ctx.get('sessions')?.get(id as SessionId)?.header
+        ?? (await ctx.get('sessionPersistence')?.stat?.(id as SessionId, { signal: this.host.lifetime }))?.header
+      if (header && header.agentPreset !== this.preset(role)) throw new Error('Existing Session was not created in this managed WSL world; create a new Session instead of migrating it')
+      const master = masterWorkspace(snapshot)
+      const provisional: SessionExecutionRecord = { sessionId: id, role, snapshot, guestCwd: snapshot.target.workspace.guestPath, hostCwd: snapshot.target.workspace.hostPath }
+      const mapped = this.executionFor(provisional)
+      const requested = role === 'orchestrator' ? master.guestCwd : await mapped.mapPath!(cwd, this.host.lifetime)
+      const facts = JSON.parse(await this.dispatchGuest(provisional, ['python3', '-c', GUEST_PATH_FACTS, requested])) as GuestPathFacts
+      if (!facts.exists || !facts.directory || !facts.path?.startsWith('/')) throw new Error('Managed Session workspace must be an existing canonical guest directory')
+      const guestCwd = facts.path
+      const hostCwd = (await this.dispatchGuest(provisional, ['wslpath', '-a', '-w', guestCwd])).trim()
+      if (!hostCwd || !/^(?:[A-Za-z]:[\\/]|\\\\(?:wsl\.localhost|wsl\$)\\)/i.test(hostCwd)) throw new Error('Guest workspace has no registerable Host coordinate')
+      record = { sessionId: id, role, snapshot, guestCwd, hostCwd }
+      const stored = this.host.store.get(sessionExecutionKey(id))
+      if (stored && (stored.snapshot.target.id !== snapshot.target.id || stored.guestCwd !== guestCwd || stored.hostCwd !== hostCwd)) throw new Error('Existing Session belongs to another execution target; create a new Session')
+      // Metadata is persisted before activation; UI cold reads never load models or resolve Agents.
+      this.host.store.set(sessionExecutionKey(id), record)
+      this.executionRegistry.register(record)
+      workspaceCwd = hostCwd
+    }
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
     if ('error' in result && result.error.code === 'session/not-found') {
       const workspace = await ctx.workspaceRegistry.create(workspaceCwd)
@@ -159,13 +243,13 @@ export class Sessions {
     if (execution?.machine.wsl) {
       const presets = ctx.get('agentPresets') as { presetForSession(session: Agent['session']): string | null; select(agent: Agent, preset: string): Promise<string> }
       const wanted = this.preset(role)
+      if (result.agent.session.header.agentPreset !== wanted) throw new Error('Existing Session was not created in this managed WSL world; create a new Session instead of migrating it')
       if (presets.presetForSession(result.agent.session) !== wanted) await presets.select(result.agent, wanted)
       // Never silently reuse a historical Windows workspace with a new WSL execution backend.
       const retainedCwd = result.agent.session.header.cwd
       if (!retainedCwd) throw new Error('WSL Session has no workspace')
-      const retainedGuest = guestPath(execution.machine, retainedCwd)
-      wslWorkspacePath(retainedGuest, execution.machine.wsl.distro)
-      if (posix.normalize(retainedGuest) !== posix.normalize(guestPath(execution.machine, cwd))) {
+      const retainedGuest = await this.executionFor(record!).mapPath!(retainedCwd, this.host.lifetime)
+      if (posix.normalize(retainedGuest) !== record!.guestCwd) {
         throw new Error('Existing WSL Session belongs to a different workspace; use a fresh state directory instead of silently reusing it')
       }
     }
@@ -184,6 +268,7 @@ export class Sessions {
   /** Deliver a message once per request id: to the next turn, the current one, or `inject`ed with its label without waking the agent. */
   async prompt(sessionId: string, requestId: string, text: string, mode: 'queue' | 'steer' | { inject: string }, authorize?: () => void,
     accepted?: () => void): Promise<void> {
+    this.executions.assertOpen()
     if (this.host.executionBinding?.()?.machine.wsl) assertWslShellHealthy(sessionId)
     const result = await this.ctx.sessionController.resolveAgent(sessionId as SessionId)
     if ('error' in result) throw result.error
@@ -217,6 +302,25 @@ export class Sessions {
     })
     return { revision: prompts.current().revision, sessions, notificationPending: effects.pending('notice', 'prompts') }
   }
+  /** Busy inspection is non-mutating and includes historical owners' jobs left for a person. */
+  maintenanceBlockers(): { code: string; detail?: string }[] {
+    const blockers: { code: string; detail?: string }[] = []
+    const ids = new Set<string>([this.host.masterId, ...[...this.bindings.keys()].map(agent => agent.id)])
+    try { for (const name of this.host.store.keys(KV.sessions.prompts)) ids.add(name.slice(KV.sessions.prompts.prefix.length)) }
+    catch { blockers.push({ code: 'managed-session-discovery-unavailable' }) }
+    for (const id of ids) {
+      const agent = this.ctx.agents.get(id as SessionId)
+      if (agent && agent.status !== 'idle') blockers.push({ code: 'managed-turn', detail: id })
+      const pending = [...agent?.inbox?.nextTurn ?? [], ...agent?.inbox?.nextStep ?? []].some(message => {
+        const source = message.source as { kind: string; form?: string; plugin?: string }
+        return !(source.form === 'notice' && (source.kind === 'dsh-superagent' || source.kind === 'plugin' && source.plugin === 'dsh-superagent'))
+      })
+      if (pending) blockers.push({ code: 'managed-input-pending', detail: id })
+      try { for (const job of runningJobs(this.ctx, id)) blockers.push({ code: 'managed-job', detail: `${id}/${job.id}` }) }
+      catch { blockers.push({ code: 'managed-jobs-unavailable', detail: id }) }
+    }
+    return blockers
+  }
   /** Returns the prompt version a Session runs under (the one bound on its latest model request, or the current version). */
   promptVersion(sessionId: string): PromptVersion {
     const revision = this.host.store.get(KV.sessions.prompts(sessionId))?.at(-1)
@@ -249,6 +353,11 @@ export class Sessions {
       ? { state: 'error', detail: retries.slice(0, 5).map(item => `${item.sessionId}: ${item.provider} is over its model budget; retried ${item.attempts} times, waiting since ${item.since}; the model and retry policy are unchanged`).join('; ') + (retries.length > 5 ? `; ${retries.length - 5} more Sessions` : ''), at: retries.at(-1)!.lastAt }
       : { state: 'ready', detail: 'No managed Session is waiting on a model budget retry' })
   }
+  private managed(id: string): boolean {
+    if (this.disposed) return false
+    if (id === this.host.masterId || this.executionIds.has(id) || [...this.bindings.keys()].some(agent => agent.id === id)) return true
+    return !this.host.closing() && !!this.host.store.tickets.get(ticketOfSession(id) ?? '')
+  }
   private ticketOf(agent: Agent): Ticket | undefined {
     const ticketId = ticketOfSession(agent.id)
     return ticketId === undefined ? undefined : this.host.store.tickets.get(ticketId)
@@ -258,11 +367,61 @@ export class Sessions {
       ? role === 'worker' ? WSL_WORKER_PRESET : WSL_ROUTER_PRESET
       : role === 'worker' ? WORKER_PRESET : ROUTER_PRESET
   }
+  /** All guest calls use immutable machine identity, including independent control calls during teardown. */
+  private async dispatchGuest(record: SessionExecutionRecord, argv: string[], stdin?: string, signal?: AbortSignal, maxBuffer?: number, cleanup = false): Promise<string> {
+    if (!cleanup) { this.executions.assertOpen(); await this.executionRegistry.assertCurrent(record) }
+    const target = record.snapshot.target, configured = this.host.executionBinding?.()?.machine
+    if (!configured) throw new Error('Managed execution machine is unavailable')
+    const machine = { ...configured, wsl: { ...configured.wsl!, distro: target.distro, user: target.user } }
+    try {
+      return await runWsl(machine, { argv, cwd: cleanup ? '/' : record.guestCwd, stdin,
+        env: { ...record.snapshot.environment.set, ...Object.fromEntries(record.snapshot.environment.unset.map(key => [key, undefined])) },
+        expectedIdentity: { uid: target.uid, bootId: target.bootId },
+        signal: cleanup ? AbortSignal.timeout(15000) : AbortSignal.any([this.host.lifetime, signal ?? AbortSignal.timeout(90000)]),
+        timeoutMs: cleanup ? 10000 : 90000, maxBuffer })
+    } catch (error) {
+      if ((error as { code?: unknown })?.code === 'WSL_CLEANUP_UNCONFIRMED') this.executions.unconfirmed(record.sessionId, error)
+      throw error
+    }
+  }
+  private shellPolicyFor(sessionId: string) {
+    const session = this.ctx.agents.get(sessionId as SessionId)?.session
+    const policy = this.ctx.get('sandboxPolicy')
+    if (!session || !policy) throw new Error('WSL shell policy requires this exact live Session and its sandbox policy service')
+    return policy.resolve({ session })
+  }
+  private executionFor(record: SessionExecutionRecord): WslExecutionBinding {
+    const execution = this.host.executionBinding?.()
+    if (!execution) throw new Error('Managed execution binding is unavailable')
+    const mapper = new WorkspacePathMapper(record.snapshot.target, {
+      guest: (argv, signal) => this.dispatchGuest(record, argv, undefined, signal),
+      host: async () => { throw new Error('Session path mapping cannot register a new workspace root') },
+    })
+    return { ...execution, snapshot: record.snapshot, guestCwd: record.guestCwd, hostCwd: record.hostCwd,
+      lifetime: this.host.lifetime, onCleanupUnconfirmed: error => this.executions.unconfirmed(record.sessionId, error ?? new Error('Guest cleanup unconfirmed')),
+      assertCurrent: async () => { this.executions.assertOpen(); await this.executionRegistry.assertCurrent(record) },
+      resolveShellPolicy: () => this.shellPolicyFor(record.sessionId),
+      mapPath: async (input, signal = this.host.lifetime, cwd = record.guestCwd) => {
+        signal.throwIfAborted()
+        // Core workingDirectory supplies Host coordinates even inside a managed WSL preset.
+        // Map that trusted per-call base through this pinned target before resolving any relative input.
+        const guestBase = await mapper.guestPath(cwd, record.guestCwd, signal)
+        signal.throwIfAborted()
+        return mapper.guestPath(input, guestBase, signal)
+      },
+      mapHostPath: async (guestPath, signal) => (await this.dispatchGuest(record, ['wslpath', '-a', '-w', guestPath], undefined, signal)).trim(),
+      control: (script, id) => this.dispatchGuest(record, ['python3', '-c', script, id], undefined, undefined, 65536, true),
+      ownExecution: (handle, diagnostics) => this.executions.own(record.sessionId, handle, diagnostics) }
+  }
   private bindExecution(agent: Agent, binding: SessionBinding, ticket?: Ticket): void {
     const execution = this.host.executionBinding?.()
     if (!execution?.machine.wsl) return
+    const record = this.host.store.get(sessionExecutionKey(agent.id))
+    if (!record) return // A managed but unverified Session stays blocked; never install a deployment-global cwd.
     binding.execution?.()
-    binding.execution = registerWslExecution(agent.id, execution, () => ticket
+    this.executionRegistry.register(record)
+    this.executionIds.add(agent.id)
+    binding.execution = registerWslExecution(agent.id, this.executionFor(record), () => ticket
       ? Object.fromEntries(this.host.environment(this.host.store.tickets.get(ticket.id) ?? ticket).map(item => [item.key, item.value])) : {})
   }
   private async decorate(agent: Agent): Promise<void> {
@@ -362,7 +521,12 @@ export class Sessions {
     }
     const binding: SessionBinding = { disposers: this.workOnly(agent, ticketId), subagent: true }
     this.bindings.set(agent, binding)
-    if (execution) binding.execution = registerWslExecution(agent.id, execution, execution.variables)
+    if (execution) {
+      this.executionIds.add(agent.id)
+      binding.execution = registerWslExecution(agent.id, { ...execution,
+        resolveShellPolicy: () => this.shellPolicyFor(agent.id),
+        ownExecution: (handle, diagnostics) => this.executions.own(agent.id, handle, diagnostics) }, execution.variables)
+    }
   }
   /** Register the skills of a prompt version in the agent's skill scope, in place of an earlier version's. */
   private bindSkills(binding: SessionBinding, version: PromptVersion): void {
@@ -402,6 +566,59 @@ export class Sessions {
       try { dispose() } catch (error) { this.ctx.logger.warn('dsh-superagent could not release what it registered for a Session: %s', String(error)) }
     }
   }
+  /** Close admission before any awaited teardown; this barrier must precede subprocess and Store disposal. */
+  shutdownExecutions(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise
+    this.executions.close()
+    let discoveryError: unknown
+    let workers: string[] = []
+    try { workers = this.host.store.tickets.list().map(ticket => `worker-${ticket.id}`) } catch (error) { discoveryError = error }
+    const ids = new Set([this.host.masterId, ...this.executionIds, ...this.executions.ids(),
+      ...workers, ...[...this.bindings.keys()].map(agent => agent.id)])
+    // Calling (not awaiting) the shell helper closes preparation synchronously, before Root handles are killed.
+    const shells = [...ids].map(id => disposeWslShellExecutions(id))
+    const owners = this.executions.shutdown()
+    this.shutdownPromise = (async () => {
+      const roots = [...ids].map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => !!agent)
+      const subagents = this.ctx.get('subagents') as { drainDescendants?(roots: readonly Agent[]): Promise<void>;
+        listDescendants?(id: SessionId): Promise<readonly unknown[]> } | undefined
+      const drain = Promise.resolve().then(async () => {
+        if (!subagents || !roots.length) return
+        if (subagents.drainDescendants) return subagents.drainDescendants(roots)
+        if (!subagents.listDescendants) throw new Error('Managed descendant discovery is unavailable during final shutdown')
+        for (const root of roots) if ((await subagents.listDescendants(root.id)).length) throw new Error('Resident descendants cannot be safely drained on this DSH release')
+      })
+      const critical = [owners, ...shells, drain]
+      const work = [...critical,
+        ...roots.map(async agent => {
+          agent.cancel({ kind: 'user' }, { keepInbox: true })
+          if (agent.status !== 'idle') await agent.whenIdle()
+        }),
+        ...[...ids].map(id => killJobs(this.ctx, id, 'dsh-superagent stopped'))]
+      const results = await Promise.allSettled(work)
+      for (const release of this.turns.values()) release(); this.turns.clear()
+      const errors = results.slice(0, critical.length).filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason)
+      if (discoveryError !== undefined) errors.push(discoveryError)
+      for (const id of ids) try { assertWslShellHealthy(id) } catch (error) { this.executions.unconfirmed(id, error); errors.push(error) }
+      for (const root of roots) if (root.status !== 'idle') errors.push(new Error(`Managed turn remains after shutdown: ${root.id}`))
+      for (const id of ids) {
+        try { if (runningJobs(this.ctx, id).length) errors.push(new Error(`Managed jobs remain after shutdown: ${id}`)) }
+        catch (error) { errors.push(error) }
+      }
+      // Kill/cancel errors with positive idle/job/cleanup evidence above are ordinary operation failures, not uncertainty.
+      if (errors.length) {
+        const error = Object.assign(new AggregateError(errors, 'Managed Session shutdown failed'), { code: 'WSL_CLEANUP_UNCONFIRMED' })
+        for (const id of ids) this.executions.unconfirmed(id, error)
+        throw error
+      }
+    })()
+    return this.shutdownPromise
+  }
   /** Releases prompt sections, skills, and tools registered by `Sessions` across all decorated agents. */
-  dispose(): void { for (const agent of [...this.bindings.keys()]) this.release(agent) }
+  dispose(): void {
+    this.disposed = true
+    this.releaseGuestResolver(); this.releaseWorkspaceRegistry()
+    for (const release of this.turns.values()) release(); this.turns.clear()
+    for (const agent of [...this.bindings.keys()]) this.release(agent)
+  }
 }

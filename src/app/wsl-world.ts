@@ -1,12 +1,31 @@
 /** Per-session WSL execution bindings. No process environment or profile state is changed. */
 import type { Machine } from '../deployment.ts'
 import { posix } from 'node:path'
+import type { ShellExecution } from '@deepseek-ai/dsh-shell'
+import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
+import type { ExecutionSnapshot } from '../execution/target.ts'
 
 /** SQLite stays on the Host; the orchestrator Session needs an ext4 guest workspace. */
 export const orchestratorWorkspace = (machine: Pick<Machine, 'stateDir' | 'wsl'>): string =>
   machine.wsl ? posix.join(machine.wsl.workRoot, '.orchestrator') : machine.stateDir
 
-export interface WslExecutionBinding { machine: Machine; env: Record<string, string | undefined> }
+export interface WslExecutionBinding {
+  machine: Machine
+  env: Record<string, string | undefined>
+  lifetime?: AbortSignal
+  onCleanupUnconfirmed?: (error?: unknown) => void
+  /** Verified world plus per-Session cwd; legacy records do not authorize the new providers. */
+  snapshot?: ExecutionSnapshot
+  guestCwd?: string
+  hostCwd?: string
+  mapPath?: (input: string, signal?: AbortSignal, cwd?: string) => Promise<string>
+  mapHostPath?: (guestPath: string, signal?: AbortSignal) => Promise<string>
+  assertCurrent?: () => void | Promise<void>
+  /** Synchronous effective policy for this exact live Session; no global-default substitution. */
+  resolveShellPolicy?: () => SandboxExecutionPolicy | undefined
+  control?: (script: string, id: string) => Promise<string>
+  ownExecution?: (execution: ShellExecution, diagnostics?: { cleanupError: () => unknown }) => () => void
+}
 interface BoundExecution extends WslExecutionBinding { variables: () => Record<string, string> }
 const bindings = new Map<string, BoundExecution>()
 

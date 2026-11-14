@@ -1,6 +1,6 @@
 # 007 Architecture
 
-This is the developer guide to the implementation. It maps the concepts in [001 Domain model](001-domain.md) through [006 Deployment](006-deployment.md) to classes, interfaces and files. Start with the runtime and Engine, then use the module and test tables as a code index.
+This is the developer guide to the implementation. It maps the concepts in [001 Domain model](<001-domain.md>) through [006 Deployment](<006-deployment.md>) to classes, interfaces and files. Start with the runtime and Engine, then use the module and test tables as a code index.
 
 ## Core classes and glue
 
@@ -40,6 +40,18 @@ Shutdown cancels turns, waits for passes, effects and agents, restores the proce
 | Passes | `src/app/passes.ts` | One pass at a time, every two seconds and whenever a command asks: the due effects, then `Engine.evaluateDue`; a Source's Trigger reaches the Engine through it |
 | Outbox | `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt and queues its `reply` effect in one transaction, and the effect's handler sends it through `SourceRegistry.send`; a message waits while its Source is off, and is dropped when the conversation is gone or not listened to |
 | Notices | `src/app/notices.ts` | Converts domain events and worker activity into main-Session messages. `eventNotice` handles domain notices; `reportRelay` forwards questions immediately, keeps ordinary progress on its Ticket, and relays other reports; `followupRelay` names the Tickets that own a human follow-up. Relays arriving during a turn are delivered together at its next step through the DeepSeek Harness inbox |
+
+### Hardened Windows→WSL world
+
+The current branch pins Desktop 0.2.2-rc.3 / Node ≥24.9.0 and emits one dsh-superagent 0.2.0-wsl.1 machine tgz/one patch. Raw runtime is disabled, machine runtime enabled, watchers disabled; Core recursively resolves dependencyClosure rather than requiring every transitive code package to be a direct profile dependency.
+
+Requested distro/user/workspace syntax becomes an immutable verified execution snapshot with UID/HOME, generation and canonical Host/guest paths. Mapping uses real wslpath for Linux, local Windows drive and same-distro UNC candidates (custom automount included), not a /mnt guess. Host realpath/stat/local-disk and directory identity checks remain mandatory. SQLite stays on verified local Windows storage, not UNC/network. Public own Shell/FS/search/context/skills/WorkspaceFiles/FileReference adapters consume Session binding, including cold metadata; ordinary Windows Sessions delegate to Host services. Legacy Windows Sessions are not migrated to WSL; mismatched old targets fail closed. Managed changes/watch is unsupported; manual refresh is available. Tested UID0/1000 guest-local and Windows-drive full-Runtime combinations, custom automount and a separate Windows ticket-root override have passed in isolation; candidate code has internally connected verifiedExecution:true for isolated full-Runtime testing. That internal flag is not deployment authorization; actual old-v2 migration, consistent-DB rollback, live GitHub business closure and browser visual acceptance remain unverified; production has not been deployed.
+
+MaintenanceGate excludes new business admission during an account/environment change and enumerates real inflight activities. Shutdown closes admission before cancel/drain/owner-handle cleanup and releases bindings only after cleanup; an unconfirmed cleanup marker persists across restart and account refresh, with no force-continue path. Execution status independently exposes safety holds and leads to Source checking.
+
+Account refresh only observes identity/permissions, without stage/settings/env/cursor/poll/pass. Explicit apply uses short-lived revision-bound one-use confirmation, paused/quiescent/no-old-backlog guards, stable account/repo IDs, isolated generation and atomic cutover T without replaying old notifications or resetting CI revisions. Legacy history requires accepted-binding confirmation; a different repo ID cannot share historical state. Exact-same accepted-binding health recovery (verified through isolated real API routes with offline stand-ins, not live-account acceptance) readonly-validates the existing generation/config/helper/CLI/target and clears only the account hold; it preserves durable backlog/cursors/generation and never stages/restarts/passes/unpauses. Real inflight, other safety holds and cleanup still block, but Open backlog alone is not a permanent recovery dead end.
+
+Static preview has no external execution and always ready=false. Explicit diagnose is business-read-only, but transport /tmp cancellation markers and gh cache writes can occur. Network GET and the owned-workspace 4096-byte write probe are separate default-false consents; no prepare/Ticket/Session/Model/source poll. A local pass is not account/model/task closure, nor production deployment.
 
 ### Engine
 
@@ -98,7 +110,7 @@ The Engine keeps batching, authorization, fan-out, resume and attention lifecycl
 - `waitsForPerson` (`src/core/model.ts`): the latest Assignment reported `blocked` or `failed`, and no human message has arrived since. Automatic Inputs and failed launches remain held while this is true.
 - `followupOwners`: the Tickets still responsible for a human follow-up received on their own Threads. A Ticket can be live or ended without a human stop and waiting to resume. Handing back the message ends that ownership.
 - `settled`: a Decision resolved the request; stop, unavailable, routed and refused-stop Decisions do not count.
-- `ticketStage` (`src/core/stage.ts`): implements the stage table in [003 Execution](003-execution.md).
+- `ticketStage` (`src/core/stage.ts`): implements the stage table in [003 Execution](<003-execution.md>).
 
 When a Ticket ends, unread follow-ups return to Eval unless another Ticket still owns them or another disposition settled them. Acknowledged, answered and handed-back messages are excluded. For older records without acknowledgement dispositions, the outbox receipt supplies that fact. A final Report also covers messages waiting when the Assignment began, including the message that resumed it. The message that stopped a Ticket is not automatically re-evaluated.
 
@@ -298,10 +310,10 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/limits.ts` | The limits of the values a person sets, which the settings schemas check and the panel's fields offer |
 | `src/kv.ts` | `KV`: every family of `kv` records with its key, its value's type and its owner, and the `Key` and `Family` types the Store and `SourceContext.state` take |
 | `src/navigation.ts` | Opens a DeepSeek Harness Session from the panel once the host's catalog lists it |
-| `src/wsl-shell.ts` | The public WSL shell executor with per-Session Superagent guest environment and distribution/user bindings |
-| `src/wsl-fs.ts` | Re-exports the public workspace filesystem provider for the isolated WSL world |
-| `src/wsl-tools.ts` | Loads the pinned workspace image and optional search providers without applying its host plugin or changing the profile |
-| `src/wsl-workspace.d.ts` | Ambient declarations for the public workspace shell and filesystem seams consumed by the adapter |
+| [`src/wsl-shell.ts`](<../src/wsl-shell.ts>) | Public WSL ShellExecutor with explicit target/canonical cwd and per-Session environment; implicit policy resolves from the exact live Session, never global fallback; low-permission requests fail closed |
+| `src/wsl-fs.ts` | Own public ctx.fs provider backed by explicit target/UID guest operations, standard Fs errors and version checks |
+| `src/wsl-tools.ts` | Own public target-bound glob/grep helpers and Workspace search, with literal paths/cancellation rather than private workspace providers |
+| `src/wsl-workspace.d.ts` | Public composition/session type augmentations; not a dependency on private vendor implementation |
 | `src/app/wsl-world.ts` | Per-Session WSL execution bindings, quoted guest environment commands, and Windows workspace coordinates |
 | `src/infra/wsl.ts` | Windows-to-WSL argv transport, guest path mapping, executable and filesystem probes, and guest-owned timeout and cancellation |
 | `src/infra/wsl-shell-transport.ts` | Guest-monitored standard Bash processes with invocation-local cancellation and descendant cleanup, without changing foreground promotion or output observation |
@@ -314,7 +326,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/core/tickets.ts` | `Tickets`: the Ticket lifecycle, the Threads a Ticket follows, Subscriptions and Inputs |
 | `src/core/assignments.ts` | `Assignments`: the Executor's facts and its workers' Reports |
 | `src/core/replies.ts` | `Replies`: the Engine's Channel writes |
-| `src/core/stage.ts` | `ticketStage` and `canRetry`: the Ticket stages of [003 Execution](003-execution.md) |
+| `src/core/stage.ts` | `ticketStage` and `canRetry`: the Ticket stages of [003 Execution](<003-execution.md>) |
 | `src/core/errors.ts` | `UserError` and `USER_ERRORS` |
 | `src/core/reasons.ts` | `Reason`, `REASONS` and `reasonText`: why the core recorded a Decision or set a Trigger aside, by code |
 | `src/core/ids.ts` | `key`: ids derived from their inputs, equal for equal inputs |
@@ -401,8 +413,31 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/markdown.ts` | The Markdown subset of reports and questions, and the bare addresses in messages, as blocks and inline parts |
 | `src/client/text.ts` | Copy by key and the wording of domain values, reasons, senders and times |
 | `src/client/marks.ts` | The marks of the states the views classify: a Ticket's or a Thread's stage, a Source's state and a Decision's outcome, each as a dot, an icon, a tone and a label |
-| `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
+| `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](<001-domain.md>) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
+| [`src/file-references.ts`](<../src/file-references.ts>) | Public FileReference routing through managed Session metadata/guest fs, ordinary Host delegation and fail-closed provenance |
+| [`src/workspace-files.ts`](<../src/workspace-files.ts>) | Public WorkspaceFiles guest reads/search with traceable-Service-safe owned entry closures and verified Session routing; ordinary Host delegation; managed changes/watch unsupported |
+| [`src/wsl-context.ts`](<../src/wsl-context.ts>) | Guest project instructions and skills under verified Session target/UID/HOME; registration scopes are minted from the authorized plugin context for the exact Agent, not driver routing-context service grants |
+| [`src/app/account-binding.ts`](<../src/app/account-binding.ts>) | Credential-free accepted binding, stable account/repository IDs, full-binding equality and cursor plan |
+| [`src/app/account-refresh-api.ts`](<../src/app/account-refresh-api.ts>) | Type-only Source refresh/apply routes and response augmentation |
+| [`src/app/account-refresh.ts`](<../src/app/account-refresh.ts>) | Readonly observations, expiring single-use confirmation, revision races, strict apply and exact-binding health recovery ports |
+| [`src/app/account-runtime.ts`](<../src/app/account-runtime.ts>) | Persisted accepted bindings/generation/cutover, Runtime safety blockers and readonly same-generation recovery adapter |
+| [`src/app/execution-api.ts`](<../src/app/execution-api.ts>) | Deployment candidate/static preview/explicit diagnose wire contracts |
+| [`src/app/execution-runtime.ts`](<../src/app/execution-runtime.ts>) | Lifetime-tracked diagnostics, Host/guest/tool/mapping probes, opt-in GitHub GET and owned 4 KiB write/cleanup |
+| [`src/client/account-refresh.tsx`](<../src/client/account-refresh.tsx>) | Source identity observation and explicit apply/recovery confirmation UI, blockers and stale-plan handling |
+| [`src/client/execution-preview.tsx`](<../src/client/execution-preview.tsx>) | Candidate static preview and independent network/write diagnostic consent UI; does not save drafts |
+| [`src/execution/env-generation.ts`](<../src/execution/env-generation.ts>) | Immutable owned guest environment generations, manifests, validation and staged cleanup |
+| [`src/execution/guest-fs-types.ts`](<../src/execution/guest-fs-types.ts>) | Guest filesystem transport/protocol operation and result types |
+| [`src/execution/host-path.ts`](<../src/execution/host-path.ts>) | Host realpath/stat and actual Windows local-disk evidence for state/workspace registration |
+| [`src/execution/maintenance.ts`](<../src/execution/maintenance.ts>) | Exclusive maintenance admission, inflight activities and fail-closed safety holds |
+| [`src/execution/path-mapper.ts`](<../src/execution/path-mapper.ts>) | Real wslpath/mount facts, canonical Host/guest directory identity and supported local workspace mapping |
+| [`src/execution/preview.ts`](<../src/execution/preview.ts>) | Pure static candidate validation, blockers/effects plan, always ready=false without external execution |
+| [`src/execution/probe.ts`](<../src/execution/probe.ts>) | Explicit readonly guest identity/tool diagnostics behind an injected runner |
+| [`src/execution/registry.ts`](<../src/execution/registry.ts>) | Verified Session execution binding registry and current-generation/provenance records |
+| [`src/execution/resolve.ts`](<../src/execution/resolve.ts>) | Resolve/probe an explicit target and both deployment/ticket roots before activation |
+| [`src/execution/session-world.ts`](<../src/execution/session-world.ts>) | Cold Session provenance, verified child workspaces and owner-handle shutdown with persistent cleanup diagnostics |
+| [`src/execution/target.ts`](<../src/execution/target.ts>) | Requested/verified immutable target, identity/workspace/snapshot types and fixed validation errors |
+| [`src/infra/guest-fs.ts`](<../src/infra/guest-fs.ts>) | Target-bound guest filesystem backend: stdin protocol, bounded reads/writes, atomic edit, cancellation and error mapping |
 
 `src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
 
@@ -425,7 +460,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/wsl-shell.spec.ts` | The public shell seam receives Session-bound guest environment and WSL identity, preserves request semantics, and refuses unbound Sessions |
 | `tests/wsl-shell-cancel.spec.ts` | Real subprocess integration for Bash handle kill, deadline/abort, detached descendants, stdin/output and cancellation races |
 | `tests/wsl-world.spec.ts` | WSL workspace coordinates, per-Session binding isolation and disposal, refreshed ticket variables, and literal guest environment quoting |
-| `tests/wsl-user.spec.ts` | Default-user identity preflight accepts one identity, refuses mismatches and failed probes, and leaves native deployments untouched |
+| `tests/wsl-user.spec.ts` | Legacy/default-user preflight compatibility checks; not a current requirement that configured execution user equal distro default |
 | `tests/bundle-patch.spec.ts` | The bundle's patch, read as DeepSeek Harness reads it, and the agent preset of Executor Sessions it defines |
 | `tests/effects.spec.ts` | The effect queue: coalescing, limits, retries with backoff, health and shutdown |
 | `tests/passes.spec.ts` | Passes: one at a time, the ones asked for during a pass run as one after it, and the runtime health a failed pass reports |
@@ -457,6 +492,21 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
+| [`tests/account-refresh.spec.ts`](<../tests/account-refresh.spec.ts>) | GET-only observation, drift/sign-out holds, explicit one-use/revision confirmation, strict switches and readonly exact-binding recovery races |
+| [`tests/account-runtime.spec.ts`](<../tests/account-runtime.spec.ts>) | Runtime binding/generation/cutover persistence, historical-state guards, maintenance/cleanup blockers and same-generation recovery |
+| [`tests/execution-preview.spec.ts`](<../tests/execution-preview.spec.ts>) | Pure static preview and explicit diagnostic adapters, independent network/write opt-in, cancellation and cleanup |
+| [`tests/execution-target.spec.ts`](<../tests/execution-target.spec.ts>) | Target validation and immutable verified identities, maintenance admission/holds and registry contracts |
+| [`tests/guest-fs.spec.ts`](<../tests/guest-fs.spec.ts>) | Real guest backend protocol operations, stdin payloads, bounded reads, standard failures and atomic/versioned edits |
+| [`tests/owned-wsl-search.spec.ts`](<../tests/owned-wsl-search.spec.ts>) | Own public search with verified target/cwd, literal paths, glob/grep limits and no private vendor provider |
+| [`tests/owned-wsl-shell.spec.ts`](<../tests/owned-wsl-shell.spec.ts>) | Own public ShellExecutor/SubprocessRuntime composition and invocation cleanup/expiry semantics |
+| [`tests/packaging.spec.ts`](<../tests/packaging.spec.ts>) | Single-tgz generator CLI, actual path-converter seam, no-overwrite/output separation, inventory and unique machine patch |
+| [`tests/panel-account-refresh.spec.tsx`](<../tests/panel-account-refresh.spec.tsx>) | Source refresh/apply/recovery UI, explicit confirmation, stale plans, blockers and error/hold presentation |
+| [`tests/panel-execution-preview.spec.tsx`](<../tests/panel-execution-preview.spec.tsx>) | Candidate drafts/static preview and diagnostic side-effect consent/defaults without save/apply |
+| [`tests/path-mapper.spec.ts`](<../tests/path-mapper.spec.ts>) | Linux/local-drive/same-distro UNC mapping, custom mounts, Host locality/registration and matching directory evidence |
+| [`tests/sessions-world.spec.ts`](<../tests/sessions-world.spec.ts>) | Per-Session immutable worlds/canonical cwd, owner cleanup, cold metadata and shutdown/provenance guards |
+| [`tests/setup.spec.ts`](<../tests/setup.spec.ts>) | Setup activation, explicit target/generation verification, legacy binding and environment safety |
+| [`tests/workspace-files.spec.ts`](<../tests/workspace-files.spec.ts>) | Managed guest WorkspaceFiles/FileReference routing, ordinary Host delegation, cold provenance and unsupported watch |
+| [`tests/wsl-fs.spec.ts`](<../tests/wsl-fs.spec.ts>) | Public ctx.fs adapter binding, standard Fs behavior, errors, version checks and fail-closed Session identity |
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
 
@@ -612,17 +662,17 @@ There is no tool for dismissing an unavailable Decision, rerunning setup, refres
 
 Most built-in instructions live in `prompts/*.md`, with one sentence per line joined by `promptFile`. Source skills live in `skills/dsh-superagent-*/SKILL.md`. Tool descriptions and fixed notices such as restart recovery notes remain in code. Assessment instructions live only in `prompts/admission.md`.
 
-`tests/model-surface.spec.ts` checks these surfaces for drift. [004 Prompts](004-prompts.md) explains the team's editable parts.
+`tests/model-surface.spec.ts` checks these surfaces for drift. [004 Prompts](<004-prompts.md>) explains the team's editable parts.
 
 ## Configuration reload
 
-Every plugin configuration key except `stateDir` is volatile. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
+Do not generalize native volatile-limit behavior to an execution target or package upgrade. Deployment candidate preview does not save/apply; account/environment changes require explicit accepted-binding maintenance flow. Core installation/configuration previews can report restart-required; honor the actual application/warnings and confirm restarting the existing Host rather than claiming HMR. stateDir is not an in-place migration control. Keep processing paused and sources closed until explicit operator recovery; do not restore old flags automatically.
 
-A settings save that changes a Source field setup reads, such as an account's CLI, and any save while setup waits, restarts dsh-superagent. DeepSeek Harness's settings service does not serve the entry during that restart, so after its own restart dsh-superagent asks it to read the entry again, and an open form becomes editable again.
+Native non-target limits may still be read when used, but a different WSL world, generation or identity must not be swapped under a live Session. Settings legacy PUT cannot bypass account confirmation. Different historical target bindings are refused, not migrated from Windows to WSL. A successful different-binding apply may be restart-pending; exact-same-binding health recovery is readonly and must not restart or request a pass.
 
 ## Reviewing a change against real data
 
-Point `DSH_HOME` at a temporary directory and create a new profile there. Copy the database from a backup, disable every Source, pause processing and remove the main Session id. Give the GitHub and Feishu CLIs read-only stand-ins.
+Use only a separately authorized isolated test profile and a verified consistent backup, never the live profile/SQLite or its only backup. Keep Sources disabled and processing paused, use read-only CLI stand-ins and no real account/model/business execution. Do not automatically delete the main Session id, migrate Windows history to WSL, reset cursors or relax cleanup markers to make copied state start; incompatible historical targets/bindings must fail closed. Creating another service or changing production installation requires separate confirmation.
 
 ## Open questions
 

@@ -7,7 +7,7 @@ import { ROUTER_PRESET, WORKER_PRESET, WSL_ROUTER_PRESET, WSL_WORKER_PRESET } fr
 
 interface Row { id?: string; name: string; disabled?: unknown; config?: Record<string, unknown> & { plugins?: Row[] } | Row[] }
 /** The patch as DSH reads it: Cordis's include plugin parses `!!js` scalars, and applies the inserts to an entry list. */
-async function patched(): Promise<Row[]> {
+async function patched(enabled = true): Promise<Row[]> {
   const cordis = createRequire(createRequire(import.meta.url).resolve('@deepseek-ai/cordis/package.json'))
   const include = cordis.resolve('@deepseek-ai/cordis-plugin-include')
   const { entryListSchema, applyEntryPatches } = await import(include) as {
@@ -15,7 +15,11 @@ async function patched(): Promise<Row[]> {
   const yaml = await import(createRequire(include).resolve('js-yaml')) as { load(text: string, options: { schema: unknown }): unknown }
   const patches = yaml.load(readFileSync(join(import.meta.dirname, '..', 'cordis.patch.yml'), 'utf8'), { schema: entryListSchema }) as unknown[]
   const warnings: string[] = []
-  const rows = applyEntryPatches([], patches, message => { warnings.push(message) })
+  // Exact stock rows in dsh-web-app 0.2.2-rc.3; a separate row replaces each provider reversibly.
+  const rows = applyEntryPatches([
+    { id: 'workspace-files', name: '@deepseek-ai/dsh-api-workspace-files' },
+    { id: 'file-reference-local', name: '@deepseek-ai/dsh-file-reference-local' },
+  ], enabled ? patches : [], message => { warnings.push(message) })
   expect(warnings).toEqual([])
   return rows
 }
@@ -34,8 +38,8 @@ it('keeps the raw library bootstrap and its sources inert until a configuration 
 })
 it('defines the worker preset Executor Sessions run under, with a shell that moves long commands to the background', async () => {
   const rows = await patched()
-  expect(rows.map(row => row.id)).toEqual(['dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-feishu', 'dsh-superagent-worker-preset',
-    'dsh-superagent-router-preset', 'wsl-dsh-superagent-worker-preset', 'wsl-dsh-superagent-router-preset'])
+  expect(rows.map(row => row.id)).toEqual(['workspace-files', 'file-reference-local', 'dsh-superagent', 'dsh-superagent-github', 'dsh-superagent-feishu', 'dsh-superagent-worker-preset',
+    'dsh-superagent-router-preset', 'dsh-superagent-workspace-files', 'dsh-superagent-file-references', 'wsl-dsh-superagent-worker-preset', 'wsl-dsh-superagent-router-preset'])
   const preset = presetOf(rows, WORKER_PRESET)
   expect(preset.id).toBe(WORKER_PRESET)
   const plugins = flat(preset.plugins)
@@ -92,8 +96,29 @@ it('keeps WSL tools in one isolated world, with standard names, 5-second jobs an
     expect(plugins.find(row => row.name === 'dsh-superagent/wsl-shell')?.config).toEqual({ timeoutMs: 5000, maxTimeoutMs: 5000 })
     expect(plugins.find(row => row.name === '@deepseek-ai/dsh-tool-jobs')?.config).toEqual({ waitTimeoutMs: 5000, maxWaitTimeoutMs: 5000 })
     expect(plugins.find(row => row.name === 'dsh-superagent/wsl-tools')?.config).toEqual({ search: id === WSL_WORKER_PRESET })
-    expect(plugins.some(row => row.name === '@deepseek-ai/dsh-tool-subagent')).toBe(false)
+    for (const name of ['@deepseek-ai/dsh-tool-subagent', '@deepseek-ai/dsh-tool-workflow', '@deepseek-ai/dsh-agent-instructions', '@deepseek-ai/dsh-skill-filesystem'])
+      expect(plugins.some(row => row.name === name), name).toBe(false)
+    expect(preset.plugins.some(row => row.name === 'dsh-superagent/wsl-context')).toBe(false)
+    expect(flat(world.config as Row[]).filter(row => row.name === 'dsh-superagent/wsl-context')).toEqual([
+      { id: 'wsl-context', name: 'dsh-superagent/wsl-context', config: { maxBytes: 65536 } },
+    ])
+    if (id === WSL_WORKER_PRESET) expect(plugins.find(row => row.name === '@deepseek-ai/dsh-tool-fs')?.config).toEqual({ readImage: true })
     if (id === WSL_ROUTER_PRESET) expect(plugins.find(row => row.name === '@deepseek-ai/dsh-tool-fs')?.config)
-      .toEqual({ readImage: false, write: false, edit: false })
+      .toEqual({ readImage: true, write: false, edit: false })
   }
+})
+
+it('replaces each stock Host service once without competing active providers, and preserves unique preset identities', async () => {
+  const rows = await patched()
+  expect(rows.find(row => row.id === 'workspace-files')?.disabled).toBe(true)
+  expect(rows.find(row => row.id === 'file-reference-local')?.disabled).toBe(true)
+  for (const name of ['dsh-superagent/workspace-files', 'dsh-superagent/file-references', 'dsh-superagent', 'dsh-superagent/github-watch'])
+    expect(rows.filter(row => row.name === name)).toHaveLength(1)
+  expect(new Set(rows.map(row => row.id)).size).toBe(rows.length)
+  const presets = rows.filter(row => row.name === '@deepseek-ai/dsh-agent-preset')
+  expect(new Set(presets.map(row => (row.config as { id: string }).id)).size).toBe(4)
+  // Removing this bundle means applying no overlay to the original web-app rows.
+  const stock = [{ id: 'workspace-files', name: '@deepseek-ai/dsh-api-workspace-files' },
+    { id: 'file-reference-local', name: '@deepseek-ai/dsh-file-reference-local' }]
+  expect(await patched(false)).toEqual(stock)
 })

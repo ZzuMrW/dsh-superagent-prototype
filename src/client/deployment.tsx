@@ -7,7 +7,8 @@ import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ConfigPageForm } from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import { LIMITS } from '../limits.ts'
 import type { SetupView } from './api.ts'
-import { InfoTip, Input } from './controls.tsx'
+import { Input } from './controls.tsx'
+import { ExecutionPreview, candidateMachine } from './execution-preview.tsx'
 import { SaveBar, useDraft } from './draft.tsx'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
 import { Field, Fields } from './settings-kit.tsx'
@@ -20,8 +21,12 @@ type Op = Parameters<ConfigPageForm['mutate']>[0][number]
 const MACHINE_LIMITS = ['promptMaxChars', 'admissionContextMaxPages', 'admissionContextTimeoutMs'] as const
 type Limits = Record<typeof MACHINE_LIMITS[number], string>
 const text = (value: unknown): string => typeof value === 'string' || typeof value === 'number' ? String(value) : ''
-const limitsOf = (values: object | undefined): Limits =>
-  Object.fromEntries(MACHINE_LIMITS.map(key => [key, text((values as Record<string, unknown> | undefined)?.[key])])) as Limits
+const deploymentOf = (values: object | undefined) => {
+  const machine = candidateMachine(values)
+  return { ...Object.fromEntries(MACHINE_LIMITS.map(key => [key, text((values as Record<string, unknown> | undefined)?.[key])])) as Limits,
+    stateDir: machine.stateDir, wsl: !!machine.wsl, distro: machine.wsl ? machine.wsl.distro : '',
+    user: machine.wsl ? machine.wsl.user : '', workRoot: machine.wsl ? machine.wsl.workRoot : '' }
+}
 
 export function usePageForm(form: ConfigForm<Record<string, unknown>> | undefined): DeploymentForm {
   const subscribe = useCallback((listener: () => void) => form ? form.subscribe(listener) : () => {}, [form])
@@ -35,14 +40,19 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
   const snapshot = form?.state
   const editable = snapshot?.status === 'ready' && snapshot.writable
   // Pass `revision` only while DSH serves writable values so a draft started before `ready` rebases once writable.
-  const draft = useDraft({ saved: limitsOf(editable ? snapshot.value : setup.machine), revision: editable ? snapshot.revision : undefined,
+  const draft = useDraft({ saved: deploymentOf(editable ? snapshot.value : setup.machine), revision: editable ? snapshot.revision : undefined,
     reload: async () => {},
     save: async (value, revision, base) => {
       const ops: Op[] = MACHINE_LIMITS.filter(key => value[key].trim() !== base[key].trim())
         .map(key => value[key].trim() ? { op: 'set', path: [key], value: Number(value[key]) } : { op: 'unset', path: [key] })
+      if (value.stateDir !== base.stateDir) ops.push({ op: 'set', path: ['stateDir'], value: value.stateDir })
+      if (value.wsl !== base.wsl || value.distro !== base.distro || value.user !== base.user || value.workRoot !== base.workRoot) {
+        ops.push({ op: 'set', path: ['wsl'], value: value.wsl ? { distro: value.distro, user: value.user, workRoot: value.workRoot } : false })
+      }
+      const restarting = ops.some(op => op.path[0] === 'stateDir' || op.path[0] === 'wsl')
       if (!form || !await form.mutate(ops, revision)) throw new Error(t('deploymentRefused'))
-      notify(t('saved'))
-      return { revision: revision + 1, restarting: false }
+      notify(t(restarting ? 'savedRestarting' : 'saved'))
+      return { revision: revision + 1, restarting }
     } })
   const accounts = setup.accounts
   // Current DSH exposes writability directly; an unavailable entry is still starting.
@@ -51,6 +61,11 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
     : !editable ? t('deploymentReadOnly') : undefined
   const limit = (key: typeof MACHINE_LIMITS[number], label: string) => <Field label={label}>
     <Input type="number" min={LIMITS[key].min} max={LIMITS[key].max} step={1} value={draft.value[key]} disabled={!editable}
+      onChange={event => draft.edit({ ...draft.value, [key]: event.target.value })} />
+  </Field>
+  const machine = { stateDir: draft.value.stateDir, wsl: draft.value.wsl ? { distro: draft.value.distro, user: draft.value.user, workRoot: draft.value.workRoot } : false as const }
+  const machineInput = (key: 'stateDir' | 'distro' | 'user' | 'workRoot', label: string, hint?: string) => <Field label={label} hint={hint}>
+    <Input className="dt-mono" value={draft.value[key]} disabled={!editable} spellCheck={false}
       onChange={event => draft.edit({ ...draft.value, [key]: event.target.value })} />
   </Field>
   const feishu = accounts?.feishu ? accounts.feishu.name || accounts.feishu.botId
@@ -68,10 +83,15 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
       </Section>}
       <Section title={t('deploymentMachine')}>
         {readOnlyHint && <Hint>{readOnlyHint}</Hint>}
-        <div className="dt-field">
-          <span className="dt-field-head">{t('deploymentStateDir')}<InfoTip text={t('deploymentStateDirHint')} /></span>
-          <span className="dt-mono">{setup.machine.stateDir}</span>
-        </div>
+        {machineInput('stateDir', t('deploymentStateDir'), t('deploymentStateDirHint'))}
+        <label className="dt-switch-row"><input type="checkbox" checked={draft.value.wsl} disabled={!editable}
+          onChange={event => draft.edit({ ...draft.value, wsl: event.target.checked })} />{t('executionUseWsl')}</label>
+        {draft.value.wsl && <>
+          {machineInput('distro', t('executionTargetDistro'))}
+          {machineInput('user', t('executionTargetUser'))}
+          {machineInput('workRoot', t('executionWorkRoot'))}
+        </>}
+        <Hint>{t('executionMachineRestart')}</Hint>
       </Section>
       <Section title={t('deploymentLimits')} hint={t('deploymentLimitsHint')}>
         {limit('promptMaxChars', t('deploymentPromptMaxChars'))}
@@ -79,6 +99,7 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
         {limit('admissionContextTimeoutMs', t('deploymentContextTimeout'))}
       </Section>
     </Fields>
+    <ExecutionPreview machine={machine} />
     {editable && <SaveBar {...draft} onDiscard={draft.discard} />}
   </form>
 }

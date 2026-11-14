@@ -26,6 +26,16 @@ it('leads the overview with the pending Tickets, then problems, the last day and
   expect(tab(zh['tab.execution']).getAttribute('aria-selected')).toBe('true')
 })
 
+it('surfaces a safety hold as actionable even when processing was not manually paused', async () => {
+  server.health.execution = { state: 'paused', detail: 'Account identity needs confirmation' }
+  await mount()
+  expect(text()).toContain(zh.executionSafetyHeldTitle)
+  expect(text()).toContain(zh.executionSafetyHeldHint)
+  expect(all('button').some(button => button.textContent === zh.resumeProcessing)).toBe(false)
+  await click(zh.executionSafetyRepair)
+  expect(tab(zh['tab.settings']).getAttribute('aria-selected')).toBe('true')
+})
+
 it('re-evaluates or dismisses an unjudged Eval from the problem list', async () => {
   await mount()
   await click(zh.requeue)

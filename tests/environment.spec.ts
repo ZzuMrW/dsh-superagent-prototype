@@ -1,5 +1,7 @@
 import { execFile, spawn } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import * as transport from '../src/infra/wsl.ts'
+import { stageGuestGeneration, discardGuestGeneration, verifyGuestGeneration } from '../src/execution/env-generation.ts'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -8,6 +10,8 @@ import { SENSITIVE_ENV_PATTERN, type SubprocessRuntime } from '@deepseek-ai/dsh-
 import { GIT_LOCATION, agentVariables, credentialHelper, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
   from '../src/infra/environment.ts'
 import { CliError } from '../src/infra/commands.ts'
+import { Setup } from '../src/app/setup.ts'
+import { SettingsSchema } from '../src/policy.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { gitEnv } from './fixtures/git.ts'
 
@@ -21,6 +25,12 @@ const workerEnv = (env: Record<string, string | undefined>): Record<string, stri
   Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined && !SENSITIVE_ENV_PATTERN.test(entry[0])))
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'environment-')); mkdirSync(join(dir, 'real')) })
 afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+
+it('uses an explicit POSIX dialect for guest config paths instead of the Host path API', () => {
+  expect(agentVariables('/home/developer/.local/state/generation', 'posix').GIT_CONFIG_GLOBAL)
+    .toBe('/home/developer/.local/state/generation/worker-gitconfig')
+  expect(agentVariables('D:\\state').GIT_CONFIG_GLOBAL).toBe(join('D:\\state', 'worker-gitconfig'))
+})
 
 describe('worker shims', () => {
   it('run a wrapper that calls `gh` by name without reaching the shim again, and keep the caller\'s other PATH entries', async () => {
@@ -182,5 +192,105 @@ describe('the repository the host\'s environment names', () => {
       for (const name of GIT_LOCATION) expect(env, name).not.toHaveProperty(name)
       expect(env.GIT_CEILING_DIRECTORIES).toBe(dir)
     } finally { vi.unstubAllEnvs() }
+  })
+})
+
+
+/** Run only the generation's Python filesystem program locally, in an owned fake HOME; never invoke WSL or GitHub. */
+function generationTransport() {
+  return vi.spyOn(transport, 'runWsl').mockImplementation(async (_machine, request) => {
+    expect(request.expectedIdentity).toMatchObject({ uid: process.getuid?.() ?? 0, bootId: 'owned-test-boot' })
+    const command = exec(request.argv[0]!, request.argv.slice(1), { cwd: request.cwd, env: { ...gitEnv(), ...request.env }, signal: request.signal, timeout: 10_000 })
+    command.child.stdin?.end(request.stdin)
+    return (await command).stdout
+  })
+}
+function generationGuest() {
+  const home = join(dir, 'selected-home'); mkdirSync(home, { mode: 0o700 })
+  const workspace = { input: dir, guestPath: dir, hostPath: '\\\\wsl.localhost\\OwnedTest\\owned-work', storage: 'guest-local' as const,
+    evidence: { converter: 'wslpath' as const, hostRegistration: 'verified' as const, fileSystem: 'ext4' } }
+  return { identity: { distro: 'OwnedTest', user: 'selected', uid: process.getuid?.() ?? 0, home, bootId: 'owned-test-boot' },
+    workspace, deploymentWorkspace: workspace, path: '/usr/local/bin:/usr/bin:/bin' }
+}
+it('rejects a native Git that ignores the staged global configuration, without activating or retaining its stage', async () => {
+  const bin = join(dir, 'old-git'); mkdirSync(bin)
+  program(join(bin, 'git'), String.raw`printf 'file:/owned-test/operator-global\000!operator-helper\000'`)
+  vi.stubEnv('PATH', [bin, process.env.PATH ?? ''].join(':'))
+  const before = { ...process.env }
+  try {
+    const deployment = testDeployment({ stateDir: dir, feishu: undefined })
+    const binding = { accountId: deployment.userId, repositoryId: deployment.repoId, login: deployment.github.login, repository: deployment.repository,
+      cli: deployment.github.cli, noreply: deployment.github.noreply, executionTarget: 'native' }
+    const setup = new Setup({ context: { subprocess: {} } as never, machine: deployment, lifetime: new AbortController().signal, restart: () => {} })
+    await expect(setup.stage(SettingsSchema.parse({}), binding, { deployment, binding })).rejects.toMatchObject({ code: 'gitTooOld' })
+    expect(setup.configured()).toBe(false)
+    expect(readdirSync(join(dir, 'generations'))).toEqual([])
+    expect(process.env).toEqual(before)
+  } finally { vi.unstubAllEnvs() }
+})
+
+describe('immutable guest environment generations', () => {
+  it('writes credential-free 0700 generations under the selected HOME, validates them, and never overwrites an old generation', async () => {
+    const mock = generationTransport()
+    try {
+      const guest = generationGuest(), signal = new AbortController().signal
+      guest.deploymentWorkspace = { ...guest.workspace, input: '/owned/deployment-root', guestPath: '/owned/deployment-root', hostPath: '\\\\wsl.localhost\\OwnedTest\\owned-deployment-root' }
+      const cli = program(join(dir, "agent's gh wrapper"), 'echo owned-cli')
+      const deployment = testDeployment({ stateDir: join(dir, 'host-state-must-stay-empty'), wsl: { distro: 'OwnedTest', user: 'selected', workRoot: dir }, github: { ...testDeployment().github, cli } })
+      const first = await stageGuestGeneration(deployment, guest, 'owned-deployment', 1, ['blocked-cli'], signal)
+      expect(first.directory.startsWith(join(guest.identity.home, '.local/state/dsh-superagent/owned-deployment/generations') + '/')).toBe(true)
+      expect(statSync(first.directory).mode & 0o777).toBe(0o700)
+      expect(statSync(join(first.directory, 'worker-bin')).mode & 0o777).toBe(0o700)
+      expect(first.snapshot.environment.unset).toEqual(expect.arrayContaining(['GH_TOKEN', 'GITHUB_TOKEN', 'GH_CONFIG_DIR']))
+      expect(first.snapshot.environment.set.HOME).toBe(guest.identity.home)
+      expect(first.snapshot.workspaces).toEqual({ deployment: guest.deploymentWorkspace, tickets: guest.workspace })
+      expect(Object.isFrozen(first.snapshot.workspaces)).toBe(true)
+      expect(JSON.stringify(first.snapshot.environment.set)).not.toMatch(/TOKEN|SECRET|PASSWORD/)
+      expect(existsSync(deployment.stateDir)).toBe(false)
+      const config = readFileSync(join(first.directory, 'worker-gitconfig'), 'utf8')
+      const second = await stageGuestGeneration(deployment, guest, 'owned-deployment', 2, [], signal)
+      expect(first.snapshot.target.generationId).not.toBe(second.snapshot.target.generationId)
+      expect(readFileSync(join(first.directory, 'worker-gitconfig'), 'utf8')).toBe(config)
+      expect(existsSync(join(first.directory, 'worker-bin/blocked-cli'))).toBe(true)
+      expect(existsSync(join(second.directory, 'worker-bin/blocked-cli'))).toBe(false)
+      await discardGuestGeneration(second, signal)
+      expect(existsSync(second.directory)).toBe(false)
+      expect(readFileSync(join(first.directory, 'worker-gitconfig'), 'utf8')).toBe(config)
+    } finally { mock.mockRestore() }
+  })
+  it('readonly verifies an existing guest generation and refuses changed CLI shim bytes without repairing them', async () => {
+    const mock = generationTransport()
+    try {
+      const guest = generationGuest(), signal = new AbortController().signal
+      const deployment = testDeployment({ wsl: { distro: 'OwnedTest', user: 'selected', workRoot: dir } })
+      const stage = await stageGuestGeneration(deployment, guest, 'owned-deployment', 1, [], signal)
+      const config = readFileSync(join(stage.directory, 'worker-gitconfig'), 'utf8'), inventory = readdirSync(stage.directory)
+      await verifyGuestGeneration(stage, [], signal)
+      expect(readFileSync(join(stage.directory, 'worker-gitconfig'), 'utf8')).toBe(config)
+      expect(readdirSync(stage.directory)).toEqual(inventory)
+      const shim = join(stage.directory, 'worker-bin', 'gh'), tampered = '#!/bin/sh\n# changed accepted CLI\nexit 1\n'
+      writeFileSync(shim, tampered)
+      await expect(verifyGuestGeneration(stage, [], signal)).rejects.toThrow('generation file changed')
+      expect(readFileSync(shim, 'utf8')).toBe(tampered)
+      expect(readFileSync(join(stage.directory, 'worker-gitconfig'), 'utf8')).toBe(config)
+    } finally { mock.mockRestore() }
+  })
+  it('refuses symlinked parents without changing their foreign contents', async () => {
+    const mock = generationTransport()
+    try {
+      const guest = generationGuest(), foreign = join(dir, 'foreign-home')
+      mkdirSync(foreign); writeFileSync(join(foreign, 'keep'), 'foreign-owned-marker')
+      symlinkSync(foreign, join(guest.identity.home, '.local'))
+      await expect(stageGuestGeneration(testDeployment(), guest, 'owned-deployment', 1, [], new AbortController().signal)).rejects.toThrow('unsafe generation parent')
+      expect(readdirSync(foreign)).toEqual(['keep'])
+      expect(readFileSync(join(foreign, 'keep'), 'utf8')).toBe('foreign-owned-marker')
+    } finally { mock.mockRestore() }
+  })
+  it('rejects unsafe shim names before any generation filesystem operation', async () => {
+    const mock = generationTransport()
+    try {
+      await expect(stageGuestGeneration(testDeployment(), generationGuest(), 'owned-deployment', 1, ['../escape'], new AbortController().signal)).rejects.toThrow('Invalid blocked command')
+      expect(mock).not.toHaveBeenCalled()
+    } finally { mock.mockRestore() }
   })
 })

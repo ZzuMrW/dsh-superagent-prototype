@@ -1,4 +1,5 @@
 /** Scoped runtime context exposed to each Source kind, isolating Sources from direct Store or Engine access. */
+import type { MaintenanceGate } from '../execution/maintenance.ts'
 import type { EngineForSources, ReceiveResult, Trigger } from '../core/index.ts'
 import type { Deployment } from '../deployment.ts'
 import type { Commands } from '../infra/commands.ts'
@@ -9,6 +10,7 @@ import type { Outbox } from './outbox.ts'
 import type { Store } from './store.ts'
 
 export interface SourceContextDeps {
+  readonly maintenance?: MaintenanceGate
   readonly store: Pick<Store, 'atomic' | 'get' | 'set' | 'delete' | 'keys' | 'threads' | 'tickets' | 'triggers' | 'read'>
   readonly outbox: Pick<Outbox, 'send'>
   readonly engine: Pick<EngineForSources, 'bindThread' | 'threadClosed'>
@@ -26,6 +28,12 @@ export interface SourceContextDeps {
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
 }
 
+const gates = new WeakMap<SourceContext, MaintenanceGate>()
+export async function withSourceAdmission<T>(ctx: SourceContext, work: () => Promise<T>): Promise<T> {
+  const release = gates.get(ctx)?.admit('source')
+  try { return await work() } finally { release?.() }
+}
+
 /**
  * Builds the context for one Source kind. Health reports are restricted to entries declared by the kind and
  * bound to the active registration, becoming no-ops once unregistered.
@@ -33,17 +41,18 @@ export interface SourceContextDeps {
 export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; health: readonly string[] }): SourceContext {
   const { store } = deps
   const health = deps.sources.healthEntries(kind.health)
-  return {
+  const context: SourceContext = {
     get deployment() { return deps.deployment },
     commands: deps.commands,
     ready: deps.ready,
-    configured: () => deps.configured(),
+    configured: () => deps.configured() && !deps.maintenance?.blockers().length,
     get problem() { return [deps.feishuProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
     config: <C extends Record<string, unknown>>(id: string) => {
+      if (deps.maintenance?.blockers().length) return undefined
       const instance = deps.sources.instance<C>(id)
       return instance?.enabled ? instance.config : undefined
     },
-    receive: trigger => deps.receive(trigger),
+    receive: trigger => { deps.maintenance?.assertOpen(); return deps.receive(trigger) },
     atomic: work => store.atomic(work),
     state: {
       get: name => store.get(name),
@@ -69,4 +78,6 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
       health.get(entry)?.set(value)
     },
   }
+  if (deps.maintenance) gates.set(context, deps.maintenance)
+  return context
 }

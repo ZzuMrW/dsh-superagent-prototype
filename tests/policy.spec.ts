@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SettingsSchema, assessmentOutcome, policyEffects, settingsPolicy, policyVersion, allowedSender, anyoneAllowed, type Settings } from '../src/policy.ts'
+import { ExecutorConfigSchema, SettingsSchema, assessmentOutcome, policyEffects, settingsPolicy, policyVersion, allowedSender, anyoneAllowed, type Settings } from '../src/policy.ts'
 import type { MandateBasis } from '../src/core/index.ts'
 import { migrateSettings } from '../src/app/migration.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
@@ -27,6 +27,14 @@ const feishu = (overrides: Partial<Trigger> & { meta?: Record<string, unknown> }
 const unaddressed = (overrides: Partial<Trigger> = {}): Trigger => { const { addressed: _addressed, ...rest } = feishu(overrides); return rest }
 const github = (login: string, addressed?: 'mention'): Trigger => ({ id: 'g', source: 'github', threads: [{ source: 'github', id: '1' }], actor: { source: 'github', id: login }, human: true, at: '', text: 'x', ...addressed ? { addressed } : {}, meta: { number: 1, isPr: true } })
 const ticket = { id: 'ticket', ended: { at: '', by: 'executor', reason: 'closed', outcome: 'closed' } } as Ticket
+
+it('accepts supported absolute executor path candidates without granting execution or accepting network roots', () => {
+  for (const directory of ['', '/home/developer/work', 'D:\\work', 'D:/work', '\\\\wsl.localhost\\Example Distro\\home\\developer\\work', '\\\\wsl$\\Example Distro\\work'])
+    expect(ExecutorConfigSchema.parse({ directory }).directory).toBe(directory)
+  for (const directory of ['relative/work', 'D:relative', '\\\\server\\share\\work', '//server/share', '/home/a\nwork'])
+    expect(ExecutorConfigSchema.safeParse({ directory }).success).toBe(false)
+  // Candidate syntax cannot prove distro ownership or local-disk mapping: Runtime still performs those checks.
+})
 
 describe('source scope', () => {
   it('listens to configured chats, reads every message only where configured, and follows the direct-message switch', () => {

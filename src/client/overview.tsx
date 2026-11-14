@@ -32,6 +32,8 @@ function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () =
       settingsRoute('source')))
     case 'no-allowed': return row(t('problemNoAllowed'), undefined, settingsRoute('eval'), undefined, go(t('actionAddAllowed'),
       settingsRoute('eval')))
+    case 'execution-held': return row(t('executionSafetyHeldTitle'), raw(problem.detail), settingsRoute('source'),
+      t('executionSafetyHeldHint'), go(t('executionSafetyRepair'), settingsRoute('source')))
     case 'executor-paused': return row(t('problemPaused'), undefined, { page: 'execution' }, undefined,
       <ConfirmButton variant="outline" icon="play" label={t('resumeProcessing')} title={t('resumeProcessing')}
         message={t('resumeProcessingConfirm')}

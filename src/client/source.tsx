@@ -1,5 +1,6 @@
 /** Source status view (health, filtered Triggers, dropped replies) and Source settings cards. */
 import { useEffect, useState } from 'react'
+import { AccountRefresh } from './account-refresh.tsx'
 import type { FieldSpec } from '../sources/kind.ts'
 import { usePoll, type DroppedReply, type SourceStatusRow, type SourceView } from './api.ts'
 import { DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
@@ -53,6 +54,8 @@ function SourceCard({ source }: { source: SourceView }) {
         <div className="dt-disclosure-body">{advanced.map(field)}</div>
       </DisclosureRow>}
     </Fields>
+    {source.installed && source.id === 'github' && <AccountRefresh id={source.id} revision={source.revision}
+      sensitiveDirty={source.restarts.some(changed)} disabled={draft.busy} reload={reload} />}
     <SaveBar {...draft} status={restarts && running > 0 ? t('restartInterrupts', { count: running }) : undefined}
       onDiscard={draft.discard} />
   </form>

@@ -12,7 +12,7 @@ export const testMachine = (overrides: Partial<Machine> = {}): Machine => ({
   admissionContextTimeoutMs: reference(15000), ...overrides,
 })
 export const testDeployment = (overrides: Partial<Deployment> = {}): Deployment => ({
-  ...testMachine(), repository: 'acme/widgets',
+  ...testMachine(), repository: 'acme/widgets', userId: '7', repoId: '42',
   github: { cli: '/bin/false', login: 'agent-bot', noreply: '7+agent-bot@users.noreply.github.com' },
   feishu: { cli: '/bin/false', botId: 'ou_bot', appId: 'cli_bot', brand: 'feishu', name: 'Widgets Bot' },
   ...overrides,

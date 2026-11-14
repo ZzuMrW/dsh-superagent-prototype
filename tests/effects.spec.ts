@@ -7,6 +7,7 @@ import { Effects, Later } from '../src/app/effects.ts'
 import { Store } from '../src/app/store.ts'
 import { HealthBoard } from '../src/infra/health.ts'
 import { deferred } from './fixtures/async.ts'
+import { MaintenanceGate } from '../src/execution/maintenance.ts'
 
 let directory: string
 let store: Store
@@ -204,4 +205,34 @@ it('reports a failure of the queue itself under its kind, until a dispatch of th
 it('refuses a second handler for a kind', () => {
   effects.handle('relay', async () => {})
   expect(() => effects.handle('relay', async () => {})).toThrow('The relay effects already have a handler')
+})
+
+it('does not dispatch while a maintenance hold is active', async () => {
+  const gate = new MaintenanceGate(), held = gate.hold('repair', { code: 'repair-required' })
+  const queue = new Effects(store, new HealthBoard(), () => clock, gate), run = vi.fn(async () => {})
+  queue.handle('relay', run); queue.start(); queue.enqueue('relay', 'held', relay('not-yet'))
+  await queue.idle()
+  expect(run).not.toHaveBeenCalled(); expect(queue.pending('relay')).toBe(true)
+  held(); await queue.idle()
+  expect(run).toHaveBeenCalledTimes(1)
+})
+
+it('keeps cancelled database rows represented as in-flight activity until their handler ends', async () => {
+  const gate = new MaintenanceGate(), hold = deferred<void>()
+  const queue = new Effects(store, new HealthBoard(), () => clock, gate)
+  const run = vi.fn(async () => { await hold.promise })
+  queue.handle('relay', run); queue.start(); queue.enqueue('relay', 'already-running', relay('owned'))
+  try {
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1))
+    queue.cancel('relay', 'already-running')
+    expect(queue.pending('relay')).toBe(false)
+    expect(gate.activityBlockers()).toEqual([{ code: 'activity-effect', detail: 'relay:already-running' }])
+    gate.hold('shutdown', { code: 'shutdown' })
+    let idle = false
+    const joined = gate.idle().then(() => { idle = true })
+    await Promise.resolve(); expect(idle).toBe(false)
+    hold.resolve(); await queue.idle(); await joined
+    expect(idle).toBe(true); expect(gate.activityBlockers()).toEqual([])
+    expect(gate.blockers()).toEqual([{ code: 'shutdown' }])
+  } finally { hold.resolve(); await queue.drain() }
 })

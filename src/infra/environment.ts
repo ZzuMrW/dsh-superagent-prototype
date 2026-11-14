@@ -3,7 +3,7 @@
  * Variables read by workers avoid `KEY|PASSWORD|SECRET|TOKEN` in their names because DSH strips credential-shaped variables from child environments.
  * Provides default-path guardrails rather than an OS-level security boundary, as workers run under the operator's OS user.
  */
-import { lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readdir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import { delimiter, join, resolve, posix } from 'node:path'
 import { executionStateDir, runWsl, type ExecutionMachine } from './wsl.ts'
@@ -43,12 +43,13 @@ export const GIT_LOCATION: readonly string[] = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT
  * Returns environment variable overrides that strip ambient GitHub tokens, interactive prompts, the repository the host's own
  * environment may name, and operator git identity/config overrides.
  */
-export function agentVariables(stateDir: string): Record<string, string | undefined> {
+export function agentVariables(stateDir: string, pathStyle: 'native' | 'posix' = 'native'): Record<string, string | undefined> {
   return {
-    GH_TOKEN: undefined, GITHUB_TOKEN: undefined,
+    GH_TOKEN: undefined, GITHUB_TOKEN: undefined, GH_ENTERPRISE_TOKEN: undefined, GITHUB_ENTERPRISE_TOKEN: undefined,
+    GH_HOST: undefined, GH_CONFIG_DIR: undefined, XDG_CONFIG_HOME: undefined,
     // A worker's git finds the repository from its directory, never from the host's environment.
     ...Object.fromEntries(GIT_LOCATION.map(name => [name, undefined])),
-    GIT_CONFIG_GLOBAL: workerGitConfig(stateDir), GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: pathStyle === 'posix' ? posix.join(stateDir, 'worker-gitconfig') : workerGitConfig(stateDir), GIT_CONFIG_NOSYSTEM: '1',
     // Clear environment git config overrides; configuration passed through the environment would otherwise reach every git command the agent runs.
     GIT_CONFIG_COUNT: undefined, GIT_CONFIG_PARAMETERS: undefined,
     // When the credential helper has no answer, git must fail rather than prompt; `GIT_ASKPASS: ''` also overrides `core.askPass` and `SSH_ASKPASS`.
@@ -73,27 +74,9 @@ async function own(file: string, text: string, mode = 0o644): Promise<void> {
   await rename(temporary, file)
 }
 
-/**
- * Atomically writes worker CLI shims and the isolated git configuration file into the state directory, refusing to overwrite foreign files.
- * Each shim strips the shim directory from PATH before exec so wrapper scripts resolving `gh` or `lark-cli` by name reach the real binary.
- */
-export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'repository' | 'github' | 'feishu' | 'wsl'>, blockedCommands: readonly string[]): Promise<void> {
+/** Pure owned-file rendering also lets recovery verify an existing generation without rewriting it. */
+export function workerEnvironmentFiles(deployment: Pick<Deployment, 'github' | 'feishu'>, blockedCommands: readonly string[], scriptDir: string): Record<string, string> {
   const { github, feishu } = deployment
-  // WSL state is deliberately mapped to the Host state directory. Host writes are atomic; guest paths only appear inside scripts.
-  const stateDir = deployment.wsl ? join(deployment.stateDir, 'execution') : deployment.stateDir
-  const dir = workerBin(stateDir)
-  const scriptDir = deployment.wsl ? posix.join(executionStateDir(deployment), 'worker-bin') : dir
-  await mkdir(dir, { recursive: true })
-  const before = await readdir(dir)
-  for (const name of before) { const file = join(dir, name); if (!await written(file)) throw new SetupError('foreignFile', { file }) }
-  // Workers may be running concurrently: write each shim to a temp file and atomically rename it so no command ever resolves past the shim directory.
-  const kept = new Set<string>()
-  const shim = async (name: string, body: string): Promise<void> => {
-    const temporary = join(dir, `.${name}.${process.pid}.tmp`)
-    await writeFile(temporary, `#!/bin/sh\n${MARKER}\n${body}\n`, { mode: 0o755 })
-    await rename(temporary, join(dir, name))
-    kept.add(name)
-  }
   const withoutShims = [
     `self=${shellQuote(scriptDir)}`, 'rest=', 'IFS=:', 'set -f',
     'for entry in $PATH; do [ "$entry" = "$self" ] || rest="${rest:+$rest:}$entry"; done',
@@ -101,23 +84,57 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
   ].join('\n')
   const run = (program: string): string => `${withoutShims}\nexec ${shellQuote(program)} "$@"`
   const fail = (message: string): string => `echo ${shellQuote(message)} >&2\nexit 1`
-  await shim('gh', run(github.cli))
-  await shim('lark-cli', feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.'))
+  const script = (body: string) => `#!/bin/sh\n${MARKER}\n${body}\n`
+  const files: Record<string, string> = {
+    'worker-bin/gh': script(run(github.cli)),
+    'worker-bin/lark-cli': script(feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.')),
+    'worker-gitconfig': [MARKER, '[user]', '\tuseConfigOnly = true', '[credential]', '\thelper =',
+      '[credential "https://github.com"]', `\thelper = ${gitQuote(credentialHelper(github.cli))}`,
+      '[url "https://github.com/"]', '\tinsteadOf = git@github.com:', '\tinsteadOf = ssh://git@github.com/',
+      '[filter "lfs"]', '\tclean = git-lfs clean -- %f', '\tsmudge = git-lfs smudge -- %f', '\tprocess = git-lfs filter-process', '\trequired = true', ''].join('\n'),
+  }
   for (const name of new Set(blockedCommands.filter(name => !WORKER_COMMANDS.includes(name)))) {
-    await shim(name, fail(`${name} is blocked in this installation; use gh, which acts as ${github.login}.`))
+    if (!/^[A-Za-z0-9_.+-]+$/.test(name) || name === '.' || name === '..') throw new Error('Invalid blocked command')
+    files[`worker-bin/${name}`] = script(fail(`${name} is blocked in this installation; use gh, which acts as ${github.login}.`))
+  }
+  return files
+}
+
+/** Atomically writes owned shims/config, refusing foreign files; the pure renderer also supplies recovery's expected bytes. */
+export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'repository' | 'github' | 'feishu' | 'wsl'>, blockedCommands: readonly string[]): Promise<void> {
+  const stateDir = deployment.wsl ? join(deployment.stateDir, 'execution') : deployment.stateDir
+  const dir = workerBin(stateDir)
+  const scriptDir = deployment.wsl ? posix.join(executionStateDir(deployment), 'worker-bin') : dir
+  const files = workerEnvironmentFiles(deployment, blockedCommands, scriptDir)
+  await mkdir(dir, { recursive: true })
+  const before = await readdir(dir)
+  for (const name of before) { const file = join(dir, name); if (!await written(file)) throw new SetupError('foreignFile', { file }) }
+  const kept = new Set<string>()
+  for (const [name, text] of Object.entries(files)) {
+    if (name === 'worker-gitconfig') { await own(workerGitConfig(stateDir), text); continue }
+    const basename = name.slice('worker-bin/'.length), temporary = join(dir, `.${basename}.${process.pid}.tmp`)
+    await writeFile(temporary, text, { mode: 0o755 }); await rename(temporary, join(dir, basename)); kept.add(basename)
   }
   for (const name of before) if (!kept.has(name)) await unlink(join(dir, name))
-  await own(workerGitConfig(stateDir), [
-    MARKER,
-    // Make git refuse to commit without an explicit identity set by the worker instead of guessing from the operator's OS user.
-    '[user]', '\tuseConfigOnly = true',
-    '[credential]', '\thelper =',
-    '[credential "https://github.com"]', `\thelper = ${gitQuote(credentialHelper(github.cli))}`,
-    '[url "https://github.com/"]', '\tinsteadOf = git@github.com:', '\tinsteadOf = ssh://git@github.com/',
-    // Include Git LFS filters because the operator's global gitconfig (which usually holds them) is ignored.
-    '[filter "lfs"]', '\tclean = git-lfs clean -- %f', '\tsmudge = git-lfs smudge -- %f', '\tprocess = git-lfs filter-process', '\trequired = true',
-  ].join('\n') + '\n')
   if (deployment.wsl) await runWsl(deployment, { argv: ['python3', '-c', 'import os,sys\nfor n in os.listdir(sys.argv[1]): os.chmod(os.path.join(sys.argv[1],n),0o755)', scriptDir], cwd: '/', signal: AbortSignal.timeout(60_000) })
+}
+
+/** Readonly integrity check: never repair files or invoke a credential helper. */
+export async function verifyNativeEnvironmentFiles(directory: string, files: Readonly<Record<string, string>>): Promise<void> {
+  if (await realpath(directory) !== resolve(directory)) throw new Error('Unverified generation coordinate')
+  for (const path of [directory, workerBin(directory)]) {
+    const info = await lstat(path)
+    if (!info.isDirectory() || process.getuid && info.uid !== process.getuid()) throw new Error('Unverified generation directory')
+  }
+  if (JSON.stringify((await readdir(directory)).sort()) !== JSON.stringify(['worker-bin', 'worker-gitconfig'])) throw new Error('Generation inventory changed')
+  const expected = Object.keys(files).filter(name => name.startsWith('worker-bin/')).map(name => name.slice('worker-bin/'.length)).sort()
+  if (JSON.stringify((await readdir(workerBin(directory))).sort()) !== JSON.stringify(expected)) throw new Error('Generation shim inventory changed')
+  for (const [name, text] of Object.entries(files)) {
+    const path = join(directory, name), info = await lstat(path)
+    if (!info.isFile() || info.size !== Buffer.byteLength(text) || process.getuid && info.uid !== process.getuid()
+      || info.mode & 0o022 || name.startsWith('worker-bin/') && !(info.mode & 0o111)) throw new Error('Generation file identity changed')
+    if (await readFile(path, 'utf8') !== text) throw new Error('Generation file content changed')
+  }
 }
 
 /** Per-execution guest environment; never applied to the Windows Host process. Undefined means explicitly unset. */

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Superagent WSL local adapter",
-    "description": "Local experimental adaptation of the upstream research prototype: manage GitHub tickets on a Windows Host and run commands and workspaces in a selected WSL distribution. Requires an account and allowed list; Feishu is not enabled. Targets DSH 0.2.2-rc.3 and WSL workspace 0.7.13; see the bundled WSL-ADAPTER document for verification limits."
+    "description": "Experimental Windows Host / selected-user WSL adaptation for DSH 0.2.2-rc.3. One self-contained bundle provides runtime, client, managed workspace files, instructions and skills. The source package starts disabled; machine bundles enable only the runtime, not GitHub polling or processing. Configure and confirm account identity and allowed repositories before use. Feishu and WSL subagent/workflow delegation are not enabled. See the bundled WSL-ADAPTER document for verification limits."
   }
 }

@@ -12,7 +12,7 @@ let dir: string
 let path: string
 const program = (file: string, body = ''): string => { writeFileSync(file, `#!/bin/sh\n${body}\n`); chmodSync(file, 0o755); return file }
 /** Fake gh CLI signed in as `login` with configurable push access to acme/widgets (including its former name acme/gadgets). */
-const gh = (file: string, login: string, push = true): string => program(file, `case "$*" in\n  "api user") echo '{"login":"${login}","id":7}' ;;\n  "api repos/acme/"*" --jq {name: .full_name, push: .permissions.push}") echo '{"name":"acme/widgets","push":${push}}' ;;\n  *) exit 1 ;;\nesac`)
+const gh = (file: string, login: string, push = true): string => program(file, `case "$*" in\n  "api user") echo '{"login":"${login}","id":7}' ;;\n  "api repos/acme/"*" --jq {id: .id, name: .full_name, push: .permissions.push}") echo '{"id":42,"name":"acme/widgets","push":${push}}' ;;\n  *) exit 1 ;;\nesac`)
 /** Fake lark-cli script body returning canned auth, strict-mode, and bot info responses. */
 const lark = (status: object, mode = 'bot', bot: object = { bot: { open_id: 'ou_bot', app_name: 'Widgets Bot' }, code: 0 }): string =>
   `case "$*" in\n  "auth status") echo '${JSON.stringify(status)}' ;;\n  "config strict-mode") echo 'strict-mode: ${mode} (source: profile)' ;;\n  "api GET /open-apis/bot/v3/info --as bot --format ndjson") echo '${JSON.stringify(bot)}' ;;\nesac`
@@ -50,6 +50,15 @@ describe('configuration schema', () => {
     expect(() => Config(minimal({ stateDir: 'relative/dir' }))).toThrow()
     expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
   })
+  it('accepts absolute workspace candidates without claiming locality or creating them', () => {
+    for (const workRoot of ['/srv/owned-test', '/mnt/z/owned-test', 'Z:\\owned-test', '\\\\wsl.localhost\\OwnedTest\\owned-test']) {
+      const value = machineOf(Config({ stateDir: 'Z:\\owned-test-state', wsl: { distro: 'OwnedTest', user: 'selected', workRoot } }))
+      expect(value.wsl?.workRoot).toBe(workRoot)
+    }
+    for (const workRoot of ['relative', '\\\\server\\share']) {
+      expect(() => machineOf(Config({ stateDir: 'Z:\\owned-test-state', wsl: { distro: 'OwnedTest', user: 'selected', workRoot } }))).toThrow()
+    }
+  })
   it('names keys the configuration does not define, and where the values of older keys live now', () => {
     const raw = minimal({ repository: 'acme/widgets', repositoryPath: '/srv/widgets', blockedCommands: [], author: { name: 'Alice' }, extra: 1 })
     expect(() => machineOf(Config(raw))).toThrow('keys it does not use: repository (now on the GitHub Source), repositoryPath (now in the prepare command of the Execution settings), blockedCommands (now in the Execution settings), author (now prompt text), extra;')
@@ -59,7 +68,7 @@ describe('configuration schema', () => {
 describe('setup', () => {
   it('reads the repository from the GitHub Source and the accounts from their CLIs, skipping the worker shims', async () => {
     const deployment = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
-    expect(deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' } })
+    expect(deployment).toMatchObject({ repository: 'acme/widgets', userId: '7', repoId: '42', github: { cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' } })
     expect(deployment.github).toEqual({ cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' })
     expect(deployment).not.toHaveProperty('feishu')
     // A renamed repository is still resolved by its old name; notifications carry GitHub's current full_name.

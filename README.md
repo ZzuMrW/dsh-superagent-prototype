@@ -10,6 +10,10 @@ dsh-superagent is a proactive coding agent for one GitHub repository, packaged a
 
 It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](<docs/000-philosophy.md>) explains the principle and what it asks of the operator.
 
+## Guided installation skill
+
+Read [the installation skill](<skills/dsh-superagent-install/SKILL.md>) before choosing an installation path. It asks whether to use **official default deployment** or **Windows DSH Desktop + WSL execution**, then asks about cross-network access and checks dependencies, dedicated GitHub credentials, model/data boundaries and workspace readiness. Only a confirmed, ready environment proceeds to installation. Working style and code source are separate decisions: Desktop 0.2.2-rc.3 users are guided to this branch in either style because older upstream code may not support the current Core; the user confirms the source, and unverified native combinations stop at preparation rather than silently switching to WSL. Explicit compatible upstream-source installations still use that upstream revision's own guidance. The WSL style builds this branch as one plugin bundle. No current profile, business switches, network settings or schedules change merely by reading the skill.
+
 ## Windows Desktop + WSL setup
 
 **Use this fork and this branch, not old `main` (which has no Windows→WSL adaptation):**
@@ -24,6 +28,8 @@ git clone --branch feature/windows-wsl-hardening --single-branch \
 Create the parent directory first; do not overwrite an existing checkout. This is the authorized public fork destination, not a business account or Source repository. Maintain source code in WSL only; do not copy a Windows development checkout.
 
 Follow [SETUP](<SETUP.md>) and the [complete install/upgrade/rollback procedure](<WSL-ADAPTER.md>). The pinned acceptance target is **DSH Desktop 0.2.2-rc.3, Node ≥24.9.0, dsh-superagent 0.2.0-wsl.1**; not arbitrary versions. Build in WSL, then use the generator's real CLI to produce **one self-contained machine tgz** with one patch. Its configured runtime is enabled, watchers remain disabled; the unconfigured raw/source bundle runtime stays disabled. There is no separate main + `@local` configuration bundle. Historical linked-resolution workarounds were not a Core direct-dependency restriction; Core dependencyClosure traverses dependencies recursively.
+
+UI patch **0.2.0-wsl.2** fixes deployment-value echoing: stateDir/WSL coordinates are read-only effective Runtime values; only the three volatile limits use DSH ConfigForm writes. The preview uses the effective machine coordinates. This patch does not add an ordinary-configuration editor or migrate any data.
 
 Before installation, inspect/back up the existing profile, pause and confirm all managed workers/main Session/owner jobs/subtrees/effects and cleanup are quiescent, then take a consistent SQLite backup. Install the tgz through Core `plugin_manager`, never overwrite the whole user profile. Handle legacy binding confirmation, Source/allowlist/model/prepare/maxWorkers explicitly and keep processing paused. `restart-required` means a real confirmed restart, not HMR; replacing the current production client needs separate User confirmation. Do not auto-restore old source/processing flags or start a second Linux DSH/service.
 

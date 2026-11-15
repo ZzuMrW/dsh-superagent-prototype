@@ -2,6 +2,8 @@
 
 本文件是本分支的新机器安装、升级与交接入口；不是自动实施授权。固定验收目标为 **DSH Desktop 0.2.2-rc.3、Node ≥24.9.0、dsh-superagent 0.2.0-wsl.1**。旧 `main` 没有本适配，不承诺其他 DSH/OS 版本通用。完整步骤、命令和回滚见 [Windows→WSL 操作流程](<WSL-ADAPTER.md>)；证据与待验收矩阵见 [验收记录](<WSL-VERIFICATION.md>)。
 
+如需先选择“官方默认”还是本分支“Windows DSH 客户端＋WSL 后端”，先加载 [安装技能](<skills/dsh-superagent-install/SKILL.md>)。它会先确认工作方式、跨网需求与环境准备；本文件只用于选择 Windows＋WSL 工作方式之后；默认同侧工作方式应走技能对应路线，不能整段套用这里的 WSL 专项。
+
 ## 1. 先问清并只读检查
 
 - 每次只问一个缺失的问题；收齐后给出完整计划，再等明确确认。跳过问题不等于同意。

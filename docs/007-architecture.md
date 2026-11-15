@@ -500,6 +500,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | [`tests/owned-wsl-search.spec.ts`](<../tests/owned-wsl-search.spec.ts>) | Own public search with verified target/cwd, literal paths, glob/grep limits and no private vendor provider |
 | [`tests/owned-wsl-shell.spec.ts`](<../tests/owned-wsl-shell.spec.ts>) | Own public ShellExecutor/SubprocessRuntime composition and invocation cleanup/expiry semantics |
 | [`tests/packaging.spec.ts`](<../tests/packaging.spec.ts>) | Single-tgz generator CLI, actual path-converter seam, no-overwrite/output separation, inventory and unique machine patch |
+| [`tests/install-skill.spec.ts`](<../tests/install-skill.spec.ts>) | Installation-skill resource graph, independent working-style/source selection, Desktop version recommendation, network/account readiness and explicit execution gates |
 | [`tests/panel-account-refresh.spec.tsx`](<../tests/panel-account-refresh.spec.tsx>) | Source refresh/apply/recovery UI, explicit confirmation, stale plans, blockers and error/hold presentation |
 | [`tests/panel-execution-preview.spec.tsx`](<../tests/panel-execution-preview.spec.tsx>) | Candidate drafts/static preview and diagnostic side-effect consent/defaults without save/apply |
 | [`tests/path-mapper.spec.ts`](<../tests/path-mapper.spec.ts>) | Linux/local-drive/same-distro UNC mapping, custom mounts, Host locality/registration and matching directory evidence |

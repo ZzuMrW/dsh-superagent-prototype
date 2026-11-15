@@ -21,12 +21,10 @@ type Op = Parameters<ConfigPageForm['mutate']>[0][number]
 const MACHINE_LIMITS = ['promptMaxChars', 'admissionContextMaxPages', 'admissionContextTimeoutMs'] as const
 type Limits = Record<typeof MACHINE_LIMITS[number], string>
 const text = (value: unknown): string => typeof value === 'string' || typeof value === 'number' ? String(value) : ''
-const deploymentOf = (values: object | undefined) => {
-  const machine = candidateMachine(values)
-  return { ...Object.fromEntries(MACHINE_LIMITS.map(key => [key, text((values as Record<string, unknown> | undefined)?.[key])])) as Limits,
-    stateDir: machine.stateDir, wsl: !!machine.wsl, distro: machine.wsl ? machine.wsl.distro : '',
-    user: machine.wsl ? machine.wsl.user : '', workRoot: machine.wsl ? machine.wsl.workRoot : '' }
-}
+// ConfigForm projects volatile limits only; ordinary machine fields come from the effective Runtime view.
+const limitsOf = (values: object | undefined, fallback?: object): Limits => Object.fromEntries(MACHINE_LIMITS.map(key =>
+  [key, text(Object.prototype.hasOwnProperty.call(values ?? {}, key) ? (values as Record<string, unknown>)[key]
+    : (fallback as Record<string, unknown> | undefined)?.[key])])) as Limits
 
 export function usePageForm(form: ConfigForm<Record<string, unknown>> | undefined): DeploymentForm {
   const subscribe = useCallback((listener: () => void) => form ? form.subscribe(listener) : () => {}, [form])
@@ -40,37 +38,33 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
   const snapshot = form?.state
   const editable = snapshot?.status === 'ready' && snapshot.writable
   // Pass `revision` only while DSH serves writable values so a draft started before `ready` rebases once writable.
-  const draft = useDraft({ saved: deploymentOf(editable ? snapshot.value : setup.machine), revision: editable ? snapshot.revision : undefined,
+  const draft = useDraft({ saved: limitsOf(editable ? snapshot.value : setup.machine, setup.machine), revision: editable ? snapshot.revision : undefined,
     reload: async () => {},
     save: async (value, revision, base) => {
       const ops: Op[] = MACHINE_LIMITS.filter(key => value[key].trim() !== base[key].trim())
         .map(key => value[key].trim() ? { op: 'set', path: [key], value: Number(value[key]) } : { op: 'unset', path: [key] })
-      if (value.stateDir !== base.stateDir) ops.push({ op: 'set', path: ['stateDir'], value: value.stateDir })
-      if (value.wsl !== base.wsl || value.distro !== base.distro || value.user !== base.user || value.workRoot !== base.workRoot) {
-        ops.push({ op: 'set', path: ['wsl'], value: value.wsl ? { distro: value.distro, user: value.user, workRoot: value.workRoot } : false })
-      }
-      const restarting = ops.some(op => op.path[0] === 'stateDir' || op.path[0] === 'wsl')
       if (!form || !await form.mutate(ops, revision)) throw new Error(t('deploymentRefused'))
-      notify(t(restarting ? 'savedRestarting' : 'saved'))
-      return { revision: revision + 1, restarting }
+      notify(t('saved'))
+      return { revision: revision + 1, restarting: false }
     } })
   const accounts = setup.accounts
   // Current DSH exposes writability directly; an unavailable entry is still starting.
-  const readOnlyHint = !form ? t('deploymentNoForms')
+  const limitsReadOnlyHint = !form ? t('deploymentNoForms')
     : snapshot?.status === 'loading' ? t('loading') : snapshot?.status === 'unavailable' ? t('deploymentUnavailable')
     : !editable ? t('deploymentReadOnly') : undefined
   const limit = (key: typeof MACHINE_LIMITS[number], label: string) => <Field label={label}>
     <Input type="number" min={LIMITS[key].min} max={LIMITS[key].max} step={1} value={draft.value[key]} disabled={!editable}
       onChange={event => draft.edit({ ...draft.value, [key]: event.target.value })} />
   </Field>
-  const machine = { stateDir: draft.value.stateDir, wsl: draft.value.wsl ? { distro: draft.value.distro, user: draft.value.user, workRoot: draft.value.workRoot } : false as const }
-  const machineInput = (key: 'stateDir' | 'distro' | 'user' | 'workRoot', label: string, hint?: string) => <Field label={label} hint={hint}>
-    <Input className="dt-mono" value={draft.value[key]} disabled={!editable} spellCheck={false}
-      onChange={event => draft.edit({ ...draft.value, [key]: event.target.value })} />
+  const machine = candidateMachine(setup.machine)
+  const machineValues = { stateDir: machine.stateDir, distro: machine.wsl ? machine.wsl.distro : '',
+    user: machine.wsl ? machine.wsl.user : '', workRoot: machine.wsl ? machine.wsl.workRoot : '' }
+  const machineInput = (key: keyof typeof machineValues, label: string, hint?: string) => <Field label={label} hint={hint}>
+    <Input className="dt-mono" value={machineValues[key]} readOnly aria-readonly="true" spellCheck={false} />
   </Field>
   const feishu = accounts?.feishu ? accounts.feishu.name || accounts.feishu.botId
     : setup.feishuProblem ? setupText(t, setup.feishuProblem) : t('deploymentFeishuNone')
-  return <form className="dt-form" onSubmit={event => { void draft.submit(event) }}>
+  return <form className="dt-form" onSubmit={event => { event.preventDefault(); if (editable) void draft.submit(event) }}>
     <Fields disabled={draft.busy}>
       <Hint>{t('deploymentIntro')}</Hint>
       {setup.problem && <div className="dt-row-buttons">
@@ -82,11 +76,9 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
         <Hint>{t('deploymentAccountsWhere')}</Hint>
       </Section>}
       <Section title={t('deploymentMachine')}>
-        {readOnlyHint && <Hint>{readOnlyHint}</Hint>}
         {machineInput('stateDir', t('deploymentStateDir'), t('deploymentStateDirHint'))}
-        <label className="dt-switch-row"><input type="checkbox" checked={draft.value.wsl} disabled={!editable}
-          onChange={event => draft.edit({ ...draft.value, wsl: event.target.checked })} />{t('executionUseWsl')}</label>
-        {draft.value.wsl && <>
+        <label className="dt-switch-row"><input type="checkbox" checked={!!machine.wsl} disabled aria-readonly="true" />{t('executionUseWsl')}</label>
+        {machine.wsl && <>
           {machineInput('distro', t('executionTargetDistro'))}
           {machineInput('user', t('executionTargetUser'))}
           {machineInput('workRoot', t('executionWorkRoot'))}
@@ -94,6 +86,7 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
         <Hint>{t('executionMachineRestart')}</Hint>
       </Section>
       <Section title={t('deploymentLimits')} hint={t('deploymentLimitsHint')}>
+        {limitsReadOnlyHint && <Hint>{limitsReadOnlyHint}</Hint>}
         {limit('promptMaxChars', t('deploymentPromptMaxChars'))}
         {limit('admissionContextMaxPages', t('deploymentContextPages'))}
         {limit('admissionContextTimeoutMs', t('deploymentContextTimeout'))}

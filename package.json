@@ -2,7 +2,7 @@
   "name": "dsh-superagent",
   "author": "DeepSeek Harness Team <team@dsh.dev>",
   "license": "MIT",
-  "version": "0.2.0-wsl.1",
+  "version": "0.2.0-wsl.2",
   "private": true,
   "description": "Experimental Windows Host to WSL execution adaptation of the upstream dsh-superagent research prototype, targeting GitHub tasks on DSH Desktop 0.2.2-rc.3.",
   "type": "module",

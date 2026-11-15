@@ -52,11 +52,15 @@ it('uses explicit checkbox opt-ins and retains readable configuration and result
   await click(en.executionPreviewStatic)
   await click(all('input[type="checkbox"]')[0]!)
   await click(all('input[type="checkbox"]')[1]!)
+  await type(field('Prepare command'), 'retain this unsaved draft')
   fail = true
   await click(en.executionPreviewDiagnose)
   expect(requests[1]?.body).toMatchObject({ network: true, confirmWrite: true })
   expect(text()).toContain('diagnostic unavailable')
   expect(text()).toContain(en.executionPreviewUnavailable)
+  expect(text()).not.toContain('Correct Host stateDir')
+  expect(text()).not.toContain('enable the management layer')
+  expect(field<HTMLTextAreaElement>(en.prepareCommand).value).toBe('retain this unsaved draft')
   expect(text()).toContain(en.executionPreviewStale)
   expect(field<HTMLInputElement>(en.executionDirectory).value).toBe('')
   expect(text()).toContain(en.executionPreviewNotApplied)
@@ -78,21 +82,25 @@ it('disables duplicate requests while busy and discards responses for an edited 
   expect(field<HTMLTextAreaElement>('准备命令').value).toBe('changed while pending')
 })
 
-it('edits deployment machine coordinates in ConfigForm draft without applying just to preview', async () => {
+it('previews effective read-only deployment coordinates, never ordinary fields from a volatile ConfigForm', async () => {
   at({ page: 'settings', query: { group: 'deployment' } })
   const configForm = fakeForm()
+  configForm.publish({ value: { promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 } })
   server.form = configForm.form
+  server.setup = { ...server.setup, machine: { ...server.setup.machine, stateDir: 'D:\\effective-state',
+    wsl: { distro: 'EffectiveDistro', user: 'effective-user', workRoot: '/effective-root' } } }
   await mount()
-  await type(field(zh.deploymentStateDir), 'D:\\candidate-state')
+  expect(requests).toHaveLength(0)
+  for (const label of [zh.deploymentStateDir, zh.executionTargetDistro, zh.executionTargetUser, zh.executionWorkRoot])
+    expect(field<HTMLInputElement>(label).readOnly).toBe(true)
   const useWsl = all('label').find(label => label.textContent?.includes(zh.executionUseWsl))!.querySelector('input')!
-  if (!useWsl.checked) await click(useWsl)
-  await type(field(zh.executionTargetDistro), 'CandidateDistro')
-  await type(field(zh.executionTargetUser), 'candidate-user')
-  await type(field(zh.executionWorkRoot), '/candidate-root')
+  expect(useWsl).toMatchObject({ disabled: true, checked: true })
+  await type(field(zh.deploymentContextPages), '30')
   await click(zh.executionPreviewStatic)
   expect(configForm.mutations).toHaveLength(0)
-  expect(requests[0]?.body).toMatchObject({ stateDir: 'D:\\candidate-state', wsl: { distro: 'CandidateDistro', user: 'candidate-user', workRoot: '/candidate-root' } })
+  expect(requests[0]?.body).toMatchObject({ stateDir: 'D:\\effective-state', wsl: { distro: 'EffectiveDistro', user: 'effective-user', workRoot: '/effective-root' } })
+  expect(requests[0]?.body).not.toHaveProperty('promptMaxChars')
   expect(text()).toContain(zh.executionPreviewSyntaxValid)
   expect(text()).toContain(zh.executionPreviewSavedExecutor)
-  expect(field<HTMLInputElement>(zh.deploymentStateDir).value).toBe('D:\\candidate-state')
+  expect(field<HTMLInputElement>(zh.deploymentStateDir).value).toBe('D:\\effective-state')
 })

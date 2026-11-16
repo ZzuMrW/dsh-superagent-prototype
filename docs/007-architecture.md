@@ -394,6 +394,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
+| [`src/client/workspace-resources.ts`](<../src/client/workspace-resources.ts>) | Build-time reuse of the pinned SDK browser file resource provider, mounted as a lifecycle-owned child fiber without a runtime Harness Client module import |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
@@ -507,6 +508,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | [`tests/sessions-world.spec.ts`](<../tests/sessions-world.spec.ts>) | Per-Session immutable worlds/canonical cwd, owner cleanup, cold metadata and shutdown/provenance guards |
 | [`tests/setup.spec.ts`](<../tests/setup.spec.ts>) | Setup activation, explicit target/generation verification, legacy binding and environment safety |
 | [`tests/workspace-files.spec.ts`](<../tests/workspace-files.spec.ts>) | Managed guest WorkspaceFiles/FileReference routing, ordinary Host delegation, cold provenance and unsupported watch |
+| [`tests/workspace-preview.spec.ts`](<../tests/workspace-preview.spec.ts>) | Real strict Gateway/Registry and browser-provider integration, withdrawn-contract recovery, schema/permission rejection, lifecycle cleanup, native path preservation and managed no-Host-fallback |
 | [`tests/wsl-fs.spec.ts`](<../tests/wsl-fs.spec.ts>) | Public ctx.fs adapter binding, standard Fs behavior, errors, version checks and fail-closed Session identity |
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.

@@ -9,6 +9,10 @@ const raw = { name: 'raw',
 export default defineConfig([
   { entry: { index: 'src/index.ts', 'github-watch': 'src/sources/github.ts', 'feishu-watch': 'src/sources/feishu.ts', 'wsl-shell': 'src/wsl-shell.ts', 'wsl-fs': 'src/wsl-fs.ts', 'wsl-tools': 'src/wsl-tools.ts', 'wsl-context': 'src/wsl-context.ts', 'workspace-files': 'src/workspace-files.ts', 'file-references': 'src/file-references.ts' }, outDir: 'lib', format: 'esm', fixedExtension: false, platform: 'node', target: 'es2024', dts: true, clean: true, deps: { neverBundle: [/^@deepseek-ai\//, 'zod', 'proper-lockfile'] } },
   { entry: { client: 'src/client/index.tsx' }, outDir: 'lib', format: 'cjs', platform: 'browser', dts: false, clean: false, plugins: [raw],
-    deps: { neverBundle: ['react', 'react/jsx-runtime', 'react-dom'] },
+    // Reuse the release-pinned public SDK sources, not its browser registration
+    // script or a runtime Harness Client import. Bundle the small provider and
+    // its protocol/path helpers into our own single module factory.
+    deps: { neverBundle: ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/cordis'],
+      alwaysBundle: [/^@deepseek-ai\/dsh-api-workspace-files\//, /^@deepseek-ai\/dsh-typert-protocol(?:\/|$)/, /^@deepseek-ai\/dsh-util-workspace-path(?:\/|$)/] },
     outputOptions: { entryFileNames: 'client.js', banner: 'window.__ModuleLoader__.load({ id: "dsh-superagent", factory: (require) => {', footer: 'return module.exports; } });', intro: 'var module = { exports: {} }; var exports = module.exports;' } },
 ])

@@ -1,7 +1,9 @@
 /** Public WorkspaceFiles specialization: authorization and deployment caps remain in the original Remote service. */
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { Context } from '@deepseek-ai/cordis'
+import type { TypertContribution } from '@deepseek-ai/dsh-typert-registry'
 import { WorkspaceFiles, type Config, type WorkspaceFileScope, type WorkspaceFileRange, type WorkspaceByteReadOptions, type WorkspaceFileSearchRequest, type WorkspaceFileWatchFrame } from '@deepseek-ai/dsh-api-workspace-files'
+import { TYPERT } from '@deepseek-ai/dsh-api-workspace-files/typert'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import GuestFileSystem, { withGuestFsSession } from './wsl-fs.ts'
@@ -40,6 +42,11 @@ export default class SessionWorkspaceFiles extends WorkspaceFiles {
     // Context.extend is public metadata shadowing; no existing service/object is modified.
     const routed = ctx.extend({ get fs() { return route.getStore() ?? host } })
     super(routed, config)
+    // The stock Loader row is disabled, so its generated contract is withdrawn.
+    // Own the exact installed SDK contribution alongside this replacement service;
+    // never enable a second Host service or weaken Gateway dispatch to SRC mode.
+    // inject also gives direct SDK compositions a lifecycle-owned registration.
+    ctx.inject(['typert'], scope => { scope.typert.register(TYPERT as TypertContribution) })
     this.route = route
     this.searchLimits = { ...config.search }
     this.guest = new GuestFileSystem(ctx.isolate('fs'))

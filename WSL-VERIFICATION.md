@@ -2,6 +2,12 @@
 
 更新日期：2026-11-15。官方上游基线 `8c32a9dc5d72c033816c6a8110b37f40cf94fba4`。账号、业务项目、机器、路径、模型与证据使用占位符，不公开个人原始报告。**实现、primitive 测试、完整 Runtime 验收、安装及生产部署是不同层级，不能互相代替。**
 
+## 2026-11-16 文件预览补充验收
+
+本次在源码中补回浏览器原生 file provider 与严格 WorkspaceFiles 契约；未改变 Host/WSL 分派或权限。类型/构建/客户端产物通过，预览相关 31/31 通过；全量 1528 passed / 1 known baseline Feishu failure（1529 总计），同一失败已在 `d14bfc8` 独立基线 worktree 复现。Windows 安装 SDK 的隔离 Gateway→真实 Host/WSL 文本与二进制、原生监听、受管显式重读、拒绝与卸载重启用通过。执行注册表是合成 fixture，不扩大到完整 Runtime/旧 Session 迁移；当前生产 profile 未替换、未访问账号/模型/业务 DB，GUI 视觉验收仍未完成。错误环境路径不自动转盘符。见[完整证据范围、复现与外置补丁退出步骤](<docs/workspace-preview-verification.zh-CN.md>)。
+
+以下保留此前阶段记录，其日期、版本和计数不代表本次新增范围。
+
 ## 当前 hardening 分支状态
 
 固定目标：DSH Desktop **0.2.2-rc.3**，Node **≥24.9.0**，单包 **dsh-superagent 0.2.0-wsl.1**；不是所有版本/所有 OS 的兼容保证。此前 37/0 peer 结果仅来自 Linux 开发 checkout，不是 ASAR Host 验收；ASAR Host 实查 36 个 peer 可 resolve，剩余 `@deepseek-ai/dsh-client-ui-slots` 仅为 type contract、无产物 JS 引用。不能写成 37 个 Host peer 全部 resolve；这些检查不等于漏洞审计或零漏洞。

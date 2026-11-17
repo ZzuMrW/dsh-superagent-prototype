@@ -44,7 +44,7 @@ function fixture() {
 
 it('preserves package/client identity and exports all public Host build entries without a workspace runtime dependency', () => {
   expect(manifest.name).toBe('dsh-superagent')
-  expect(manifest.version).toBe('0.2.0-wsl.2')
+  expect(manifest.version).toBe('0.2.0-wsl.3')
   const build = readFileSync(resolve(import.meta.dirname, '../tsdown.config.ts'), 'utf8')
   expect(build).toContain('id: "dsh-superagent"')
   for (const name of ['wsl-context', 'workspace-files', 'file-references']) {
@@ -125,7 +125,7 @@ it('packs one self-contained tarball, retaining declarations/resources but no ne
   const f = fixture()
   const result = api.generateBundle(f.options, { sourceRoot: f.source, convert: f.convert,
     pack: (stage, args) => { execFileSync('npm', [...args, '--json'], { cwd: stage, encoding: 'utf8', shell: false }) } })
-  expect(readdirSync(f.out).filter(name => name.endsWith('.tgz'))).toEqual(['dsh-superagent-0.2.0-wsl.2.tgz'])
+  expect(readdirSync(f.out).filter(name => name.endsWith('.tgz'))).toEqual(['dsh-superagent-0.2.0-wsl.3.tgz'])
   const files = execFileSync('tar', ['-tzf', result.tarball], { encoding: 'utf8' }).trim().split('\n')
   for (const file of ['package.json', 'cordis.patch.yml', 'lib/index.js', 'lib/client.js', 'lib/wsl-context.d.ts', 'lib/workspace-files.d.ts',
     'lib/file-references.d.ts', 'docs/help.md', 'SETUP.md', 'WSL-ADAPTER.md', 'LICENSE']) expect(files).toContain('package/' + file)

@@ -5,6 +5,8 @@ description: 安装、升级或规划 dsh-superagent；先选择官方默认或 
 
 # Superagent 安装引导
 
+> 当前发布补丁 **0.2.0-wsl.5** 的精确兼容目标为 **DSH Desktop 0.2.2-rc.5**；必须以当前 manifest/lockfile 为准。不要用历史验收记录绕过当前版本检查。工作区接口契约和文件预览已内置，不要同时启用旧的 `@local/dsh-workspace-contracts`、`@local/dsh-file-preview-bridge` 补丁。升级已有部署时，来源/处理最终状态按用户本次明确选择保留或调整，不能自行恢复或关闭。
+
 本技能是**安装协调流程，不是执行授权**。默认只询问和只读检查；不要在用户尚未决定工作方式、网络方案或完成准备时安装插件、改 profile、启动服务、恢复业务。依赖安装属于可单独批准的环境准备，不等于插件安装授权。一次问一个缺失问题，优先复用用户已明确给出的答案；跳过/空答案不是同意。不要因为当前 Agent 恰好在 Windows/WSL，就替用户选模式。
 
 ## 1. 必须先确定工作方式
@@ -13,11 +15,11 @@ description: 安装、升级或规划 dsh-superagent；先选择官方默认或 
 
 | 选择 | DSH/模型/数据库在哪里 | 工具和项目在哪里 | 安装来源 |
 | --- | --- | --- | --- |
-| A．官方默认工作方式（同侧执行） | 已确认的 DSH Host/profile | 与 DSH 同侧，按该环境的原生工具要求执行 | 代码来源按 DSH 版本选择；Desktop 0.2.2-rc.3 优先当前分支，不等于强制旧官方源码 |
+| A．官方默认工作方式（同侧执行） | 已确认的 DSH Host/profile | 与 DSH 同侧，按该环境的原生工具要求执行 | 代码来源按 DSH 版本选择；Desktop 0.2.2-rc.5 优先当前分支，不等于强制旧官方源码 |
 | B．Windows DSH 客户端＋WSL 后端 | Windows Desktop Host/profile 管理 UI、模型和本地 SQLite | 明确的 WSL distro/user/UID/HOME，使用该用户的原生 CLI | 本 fork 的 `feature/windows-wsl-hardening`，在 WSL 构建机器版单插件 tgz |
 
 - A 的“官方默认”只描述同侧运行形态，不代表官方产品或强制使用旧官方源码。独立 POSIX 部署的上游默认是专用 Web profile/tmux；已有 Desktop 则先确认是否沿用现有 Host/profile，不自动再开第二服务。在 WSL 里独立运行 Linux DSH 也属于 A，同 Windows Host＋WSL 工具后端 B 不同。
-- **工作形态与代码来源是两个选择。** 当前已实测桌面基线为 **DSH Desktop 0.2.2-rc.3**，本分支修补版为 **0.2.0-wsl.2**。检测到该 Desktop 后，**无论选择 A 还是 B，都优先推荐当前 `feature/windows-wsl-hardening` 分支**，因为旧官方分支可能不兼容当前 Core；说明理由并让用户确认来源。用户明确坚持官方源码时，只有其 manifest/公开 API 兼容性核实后才使用；不自动降级 DSH。
+- **工作形态与代码来源是两个选择。** 当前桌面适配目标为 **DSH Desktop 0.2.2-rc.5**，本分支修补版为 **0.2.0-wsl.5**。检测到该 Desktop 后，**无论选择 A 还是 B，都优先推荐当前 `feature/windows-wsl-hardening` 分支**，因为旧官方分支可能不兼容当前 Core；说明理由并让用户确认来源。用户明确坚持官方源码时，只有其 manifest/公开 API 兼容性核实后才使用；不自动降级 DSH。
 - 推荐当前分支不等于所有原生平台/运行形态均已实测。A 的具体 Host/原生执行组合未验证时，先停在准备阶段列出缺口，不假称兼容、不静默转 B；B 才采用已有 Windows＋WSL 实测矩阵。不把“当前实测版本”写成“任何最新版都兼容”。
 - B 不另起 Linux DSH/第二模型服务，不自动切换 WSL 默认用户、改 automount、修改 Docker 发行版，也不强制 root。
 - 用户不确定时，先解释两种进程/凭据/文件边界，停在选择阶段。切换模式是迁移任务，不是在已有目录里重跑安装。
@@ -55,7 +57,7 @@ description: 安装、升级或规划 dsh-superagent；先选择官方默认或 
 
 ## 5. 严格分流执行，不混用
 
-- **A → [默认同侧安装](references/official-default.md)**：先按 DSH 版本确认代码来源；Desktop 0.2.2-rc.3 优先本分支，但保持同侧工作方式，不注入 WSL target 或调用 WSL 机器版生成器。若经核实选择官方源码，才读取独立官方 checkout 的对应 SETUP/部署文档安装。已有 Host/profile 不重建，未验证的原生组合不直接安装。
+- **A → [默认同侧安装](references/official-default.md)**：先按 DSH 版本确认代码来源；Desktop 0.2.2-rc.5 优先本分支，但保持同侧工作方式，不注入 WSL target 或调用 WSL 机器版生成器。若经核实选择官方源码，才读取独立官方 checkout 的对应 SETUP/部署文档安装。已有 Host/profile 不重建，未验证的原生组合不直接安装。
 - **B → [Windows Host＋WSL 安装](references/windows-wsl.md)**：只从已确认的当前 hardening 分支/revision 构建一个自包含机器版插件，通过目标 Windows profile 的正式插件管理器安装。不再叠“主包＋本地配置外挂”，不改 DSH 核心或手写整个 profile。
 
 安装后先验证配置与身份，不直接接单。机器字段是否可写以当前 Core 公共 API 为准：本分支回显补丁中，部署页 stateDir/WSL 目标仅显示有效只读配置；只有三个 volatile 上限可通过 ConfigForm 保存。换工作目录、换状态库、换账号不能混为一个保存操作。

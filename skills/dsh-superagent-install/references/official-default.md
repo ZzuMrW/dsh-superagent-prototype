@@ -4,7 +4,7 @@
 
 A 表示 **DSH、模型调用、数据库与项目工具在同一已确认环境执行**，不是强制安装旧官方源码。已有 Desktop 先问是否沿用该 Host/profile；不要为了套教程自动再开 Linux DSH/tmux。独立 POSIX 环境的上游默认专用 Web profile/tmux 也是 A，与 Windows Host＋WSL 工具后端 B 不同。
 
-**检测到 DSH Desktop 0.2.2-rc.3 时，不论工作方式 A 或 B，都优先推荐当前 fork 的 `feature/windows-wsl-hardening`**，说明旧官方分支可能不兼容当前 Core，然后让用户确认代码来源。当前分支声明 DSH `0.2.2-rc.3`、Node ≥24.9.0；实际版本再读 manifest/lockfile。不能把“推荐源码”写成“所有原生运行组合已验证”，不能自动切 B、降级 DSH，或把固定基线说成任意最新版。
+**检测到 DSH Desktop 0.2.2-rc.5 时，不论工作方式 A 或 B，都优先推荐当前 fork 的 `feature/windows-wsl-hardening`**，说明旧官方分支可能不兼容当前 Core，然后让用户确认代码来源。当前分支声明 DSH `0.2.2-rc.5`、Node ≥24.9.0；实际版本再读 manifest/lockfile。不能把“推荐源码”写成“所有原生运行组合已验证”，不能自动切 B、降级 DSH，或把固定基线说成任意最新版。
 
 - 当前分支来源：[ZzuMrW/dsh-superagent-prototype](https://github.com/ZzuMrW/dsh-superagent-prototype)，明确 branch、commit、dirty 状态，构建用户确认的 revision。它是适配插件来源，不是业务仓库或 Agent GitHub 身份。
 - 官方源码是另一个来源选项：[deepseek-ai/dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)。只有用户明确选择且 manifest/公开 API 与目标 DSH 的兼容性核实后才使用；用独立官方 checkout，不拿 fork 已改写的 SETUP 冒充官方文件。

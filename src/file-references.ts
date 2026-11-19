@@ -9,21 +9,23 @@ import { runWsl } from './infra/wsl.ts'
 
 /** Bounded selected-user BFS and ranking. Symlinks are neither offered nor traversed, including path-query ancestors. */
 export const GUEST_FILE_REFERENCES = String.raw`
-import os,sys,json,posixpath,stat
+import os,sys,json,posixpath,stat,heapq
 p=json.load(sys.stdin); root=p['root']; query=p['query'].replace('\\','/'); excluded=set(p['excluded']); cap=p['maxEntries']; limit=p['maxResults']; entries=[]
-def children(path,top=False):
+show_hidden=query.startswith('.') or '/.' in query
+def children(path,fragment=None,top=False):
  try:
+  def eligible(child):
+   if child.is_symlink(): return False
+   if child.name.startswith('.') and not (fragment.startswith('.') if fragment is not None else show_hidden): return False
+   return child.is_file(follow_symlinks=False) or child.is_dir(follow_symlinks=False) and child.name not in excluded
   with os.scandir(path) as scan:
-   result=[]
-   for child in scan:
-    result.append(child)
-    if len(result)>=cap: break
-  return sorted(result,key=lambda entry:entry.name)
+   # Filter before consuming the candidate budget; keep a deterministic bounded lexical selection.
+   return heapq.nsmallest(cap,(child for child in scan if eligible(child)),key=lambda entry:entry.name)
  except OSError:
   if top: raise
   return []
 def admit(base,relative,fragment=None,top=False):
- for child in children(base,top):
+ for child in children(base,fragment,top):
   if child.is_symlink(): continue
   name=child.name; path=relative+name
   if fragment is not None and name.startswith('.') and not fragment.startswith('.'): continue
@@ -84,7 +86,9 @@ export default class SessionFileReferences extends LocalFileReferenceService {
     if (found.kind === 'unmanaged') return super.list(agent, query, signal)
     if (found.kind !== 'managed' || !found.binding?.snapshot) throw new Error('Managed file-reference execution binding is unavailable or stale')
     const binding = found.binding, snapshot = binding.snapshot!
-    if (query.includes('\0') || this.guestConfig.maxEntries > 50000 || this.guestConfig.maxResults > 2000) throw new Error('Managed file-reference discovery requires valid text and bounded limits (50000 entries, 2000 results)')
+    if (query.includes('\0') || ![this.guestConfig.maxEntries, this.guestConfig.maxResults].every(value => Number.isSafeInteger(value) && value >= 0)) {
+      throw new Error('Managed file-reference discovery requires valid text and non-negative integer limits')
+    }
     await binding.assertCurrent?.()
     const combined = binding.lifetime ? AbortSignal.any([signal, binding.lifetime]) : signal
     const machine = { ...binding.machine, wsl: { ...binding.machine.wsl!, distro: snapshot.target.distro, user: snapshot.target.user } }

@@ -13,11 +13,11 @@ export class SessionNavigationError extends Error {
 /** Select `id` in the workspace once the catalog lists it, unless aborted first. */
 export async function openKnownSession(sessions: Pick<ISessions, 'list' | 'refresh'>, id: SessionId, open: (id: SessionId) => void, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return false
-  if (sessions.list.getSnapshot().phase !== 'ready' || !sessions.list.getSnapshot().byId[id]) await sessions.refresh()
+  if (sessions.list.getSnapshot().phase !== 'ready' || !sessions.list.getSnapshot().ids.includes(id)) await sessions.refresh()
   if (signal.aborted) return false
   const list = sessions.list.getSnapshot()
   if (list.phase !== 'ready') throw new SessionNavigationError('not-ready')
-  if (!list.byId[id]) throw new SessionNavigationError('not-listed')
+  if (!list.ids.includes(id)) throw new SessionNavigationError('not-listed')
   open(id)
   return true
 }

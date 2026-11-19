@@ -7,7 +7,7 @@ import { initialLocation, parseRoute, remember, setupPage } from '../src/client/
 const id = 'orchestrator-test' as SessionId
 function fixture(ready = false) {
   const pending = Promise.withResolvers<void>()
-  const state = { phase: ready ? 'ready' : 'pending', byId: ready ? { [id]: {} } : {} as Record<string, object> }
+  const state = { phase: ready ? 'ready' : 'pending', ids: ready ? [id] : [] as SessionId[], byId: ready ? { [id]: {} } : {} as Record<string, object> }
   const refresh = vi.fn(async () => { await pending.promise })
   // Navigation reads only catalog readiness and membership, not summary fields.
   const sessions = { list: { getSnapshot: () => state }, refresh } as unknown as Pick<ISessions, 'list' | 'refresh'>
@@ -17,7 +17,7 @@ it('waits for initial catalog hydration before opening the linked master', async
   const { sessions, pending, state } = fixture(); const open = vi.fn()
   const navigation = openKnownSession(sessions, id, open, new AbortController().signal)
   expect(open).not.toHaveBeenCalled()
-  state.phase = 'ready'; state.byId[id] = {}; pending.resolve()
+  state.phase = 'ready'; state.ids = [id]; state.byId[id] = {}; pending.resolve()
   await expect(navigation).resolves.toBe(true)
   expect(open).toHaveBeenCalledExactlyOnceWith(id)
 })
@@ -33,10 +33,30 @@ it('reports unavailable targets without calling the throwing Session selector', 
   await expect(navigation).rejects.toMatchObject({ code: 'not-listed' })
   expect(open).not.toHaveBeenCalled()
 })
+it('refreshes retained fallback-only Sessions and rejects targets still absent from the Host list', async () => {
+  const { sessions, pending, state, refresh } = fixture(true); const open = vi.fn()
+  state.ids = []
+  const navigation = openKnownSession(sessions, id, open, new AbortController().signal)
+  expect(refresh).toHaveBeenCalledExactlyOnceWith()
+  expect(open).not.toHaveBeenCalled()
+  pending.resolve()
+  await expect(navigation).rejects.toMatchObject({ code: 'not-listed' })
+  expect(open).not.toHaveBeenCalled()
+})
+it('opens a retained fallback only after refresh adds it to the Host list', async () => {
+  const { sessions, pending, state, refresh } = fixture(true); const open = vi.fn()
+  state.ids = []
+  const navigation = openKnownSession(sessions, id, open, new AbortController().signal)
+  expect(refresh).toHaveBeenCalledExactlyOnceWith()
+  expect(open).not.toHaveBeenCalled()
+  state.ids = [id]; pending.resolve()
+  await expect(navigation).resolves.toBe(true)
+  expect(open).toHaveBeenCalledExactlyOnceWith(id)
+})
 it('does not navigate after the panel unmounts or a newer request supersedes it', async () => {
   const { sessions, pending, state } = fixture(); const open = vi.fn(); const controller = new AbortController()
   const navigation = openKnownSession(sessions, id, open, controller.signal)
-  controller.abort(); state.phase = 'ready'; state.byId[id] = {}; pending.resolve()
+  controller.abort(); state.phase = 'ready'; state.ids = [id]; state.byId[id] = {}; pending.resolve()
   await expect(navigation).resolves.toBe(false); expect(open).not.toHaveBeenCalled()
 })
 it('reopens the page this tab showed last, and the overview for a route that no longer exists', () => {

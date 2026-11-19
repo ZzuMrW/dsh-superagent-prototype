@@ -1,12 +1,14 @@
 # B：Windows DSH 客户端＋WSL 后端
 
+> 当前迁移目标是插件 **0.2.0-wsl.5 / DSH Desktop 0.2.2-rc.5**。新包依赖与兼容门禁以 manifest 为准，不使用版本豁免。旧的两个 `@local` 工作区契约/文件预览补丁与本包内置功能重叠，不应一起启用。
+
 ## 进程与凭据边界
 
 - Windows 运行现有 DSH Desktop Host、管理 UI、模型 provider、SQLite/锁；不启动 Linux DSH/tmux 或替代 Web 服务。
 - WSL 的**明确 distro/user**运行 Git、GitHub CLI、prepare、Shell/FS/search 与项目指令/skills，不能猜默认 distro/root。用户可选已有普通 Linux 用户；记录实际 UID/HOME，root 不是安装要求，也不是 sandbox。
 - GitHub 专用 CLI/登录由用户在选定 WSL 用户中准备；Host 模型密钥留在 Host。不得复制生产发行版、Docker 发行版、个人账号配置或凭据来“准备测试”。
 
-当前分支目标：DSH Desktop `0.2.2-rc.3`、Node ≥`24.9.0`、本仓库 manifest/lockfile 指定 pnpm 和 peers。本次 UI 修补版本为 `0.2.0-wsl.2`；实际安装时重新读 manifest 与 compatibility 文档，不外推所有版本兼容。完整操作参考本分支 [SETUP](../../../SETUP.md)、[Windows→WSL 操作流程](../../../WSL-ADAPTER.md)、[验收边界](../../../WSL-VERIFICATION.md)。
+构建需 Node ≥`24.9.0`；pnpm 和 SDK peers 以 manifest/lockfile 为准，不外推其他版本的兼容性。完整操作参考本分支 [SETUP](../../../SETUP.md)、[Windows→WSL 操作流程](../../../WSL-ADAPTER.md)、[验收边界](../../../WSL-VERIFICATION.md)。
 
 ## 必须先通过的准备检查
 

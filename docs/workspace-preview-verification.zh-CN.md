@@ -1,6 +1,6 @@
 # 文件预览修复与验收（2026-11-16）
 
-适用范围：此分支的 Windows→WSL 定制版，固定 DSH Desktop/SDK **0.2.2-rc.3**。基线为 `d14bfc8`。本次是源码修复与隔离验证，不是当前生产 profile 的升级、GitHub 推送或 GUI 视觉验收。
+历史验收范围：此分支的 Windows→WSL 定制版，固定 DSH Desktop/SDK **0.2.2-rc.3**。基线为 `d14bfc8`。本次是源码修复与隔离验证，不是当前生产 profile 的升级、GitHub 推送或 GUI 视觉验收。
 
 ## 根因与正式修复
 
@@ -38,7 +38,7 @@ node scripts/verify-client-artifact.mjs
 
 ### Windows 安装 SDK + 真实文件链路
 
-先在 WSL 构建，然后用 **Windows 安装的 Electron/Node** 执行 [隔离验证脚本](<../scripts/verify-workspace-preview.mjs>)，显式提供下面的参数。脚本要求 Windows 平台，安装锚点必须是实际的 DSH CLI `package.json`，并检查包名和 0.2.2-rc.3 版本；不能用普通 Node 遍历 Desktop 的 ASAR。
+先在 WSL 构建，然后用 **Windows 安装的 Electron/Node** 执行 [隔离验证脚本](<../scripts/verify-workspace-preview.mjs>)，显式提供下面的参数。脚本要求 Windows 平台，安装锚点必须是实际的 DSH CLI `package.json`，并检查包名和 SDK 版本（当前分支脚本检查 0.2.2-rc.5；复现历史 rc.3 验收请使用当时的源码）；不能用普通 Node 遍历 Desktop 的 ASAR。
 
 ```text
 verify-workspace-preview.mjs --install-anchor=<Windows DSH CLI package.json> --distro=<registered distro> --user=<test user>

@@ -21,15 +21,20 @@ export function configureWorkspaceSessionRegistry(registry: SessionExecutionRegi
 
 /** Runtime records authorize managed reads; only trusted native header lineage authorizes Host fallback, even before setup. */
 export async function lookupWorkspaceSession(ctx: Context, sessionId: string, signal?: AbortSignal) {
-  if (owner) {
-    const found = await owner.registry.lookup(sessionId)
-    if (found.kind === 'managed') return { ...found, binding: owner.binding?.(found.record) }
+  const current = owner
+  if (current) {
+    const found = await current.registry.lookup(sessionId)
+    signal?.throwIfAborted()
+    if (owner !== current) return { kind: 'blocked' as const, code: 'SESSION_BINDING_STALE' }
+    if (found.kind === 'managed') return { ...found, binding: current.binding?.(found.record) }
     if (found.kind === 'blocked') return found
     // An unconfigured Runtime cannot classify every historical or manually selected WSL Session.
     // Absence from its registry is not evidence that the Host filesystem is the correct identity.
   }
-  return await isOrdinarySession(ctx, sessionId, signal) ? { kind: 'unmanaged' as const }
-    : { kind: 'blocked' as const, code: 'SESSION_BINDING_MISSING' }
+  const ordinary = await isOrdinarySession(ctx, sessionId, signal)
+  signal?.throwIfAborted()
+  if (owner !== current) return { kind: 'blocked' as const, code: 'SESSION_BINDING_STALE' }
+  return ordinary ? { kind: 'unmanaged' as const } : { kind: 'blocked' as const, code: 'SESSION_BINDING_MISSING' }
 }
 
 /** Routing is per request, not a global default filesystem and never an Agent activation. */
@@ -90,7 +95,8 @@ export default class SessionWorkspaceFiles extends WorkspaceFiles {
     const self = this
     return (async function* () {
       const found = await lookupWorkspaceSession(self.ctx, workspaceFileScope.sessionId, signal)
-      if (!found || found.kind !== 'unmanaged') throw new RemoteError('gateway/bad-request', 'Managed guest filesystem change observation is unsupported', {})
+      if (!found || found.kind === 'blocked') throw new RemoteError('gateway/bad-request', 'Managed workspace identity is unavailable or stale', {})
+      if (found.kind === 'managed') throw new RemoteError('workspace-file/watch-unsupported', 'Managed guest filesystem change observation is unsupported', { path })
       yield* self.hostChanges(workspaceFileScope, path, signal)
     })()
   }

@@ -148,7 +148,7 @@ def errors():
   part=p.stderr.read(4096)
   if not part: break
   stderr.extend(part)
-  if len(stderr)>4096: del stderr[:-4096]
+  if len(stderr)>q['stderrMaxBytes']: del stderr[:-q['stderrMaxBytes']]
 t=threading.Thread(target=errors,daemon=True); t.start()
 try:
  pending=bytearray(); total=0; stopped=False
@@ -163,7 +163,7 @@ try:
    paths.append(value.decode('utf-8','strict'))
  if incomplete:
   p.terminate()
-  try: p.wait(timeout=2)
+  try: p.wait(timeout=q['graceMs']/1000)
   except subprocess.TimeoutExpired: p.kill()
  code=p.wait(); t.join(timeout=1)
  if not incomplete and code not in (0,1,2): raise RuntimeError('guest file discovery failed')
@@ -171,7 +171,7 @@ try:
 finally:
  if p.poll() is None: p.kill(); p.wait()
 `
-export interface WorkspaceSearchCaps { maxResults: number; maxEntries: number; timeoutMs: number }
+export interface WorkspaceSearchCaps { maxResults: number; maxEntries: number; timeoutMs: number; stderrMaxBytes?: number; graceMs?: number }
 /** The standard workspace search contract: listed files and inferred directories, never a Host rg process. */
 export async function guestWorkspaceSearch(binding: WslSearchBinding, request: WorkspaceFileSearchRequest, signal: AbortSignal,
   limits: WorkspaceSearchCaps = { maxResults: 512, maxEntries: 100000, timeoutMs: 30000 }, transport: GuestSearchTransport = runWsl): Promise<WorkspaceFileSearchResult> {
@@ -180,22 +180,21 @@ export async function guestWorkspaceSearch(binding: WslSearchBinding, request: W
   const query = request.query.trim()
   if (!query || query.includes('\0')) throw new GuestSearchError('SEARCH_INVALID_ARGS', 'A nonempty workspace query is required')
   for (const path of request.excludedPaths) if (!path || path.includes('\0') || posix.isAbsolute(path) || path.split('/').includes('..')) throw new GuestSearchError('SEARCH_INVALID_ARGS', 'Exclusions must be literal workspace-relative names or paths')
-  const maxEntries = Math.min(100000, limits.maxEntries), maxResults = Math.min(2000, limits.maxResults)
-  if (![maxEntries, maxResults, limits.timeoutMs].every(value => Number.isSafeInteger(value) && value > 0)) throw new GuestSearchError('SEARCH_INVALID_ARGS', 'Workspace search limits must be positive integers')
+  const { maxEntries, maxResults } = limits
+  const stderrMaxBytes = limits.stderrMaxBytes ?? 65536, graceMs = limits.graceMs ?? 3000
+  if (![maxEntries, maxResults, limits.timeoutMs, stderrMaxBytes, graceMs].every(value => Number.isSafeInteger(value) && value > 0)) throw new GuestSearchError('SEARCH_INVALID_ARGS', 'Workspace search limits must be positive integers')
   const exclude = (path: string) => `--glob=!${path.includes('/') ? '/' : ''}${path.replace(/[\\*?\[\]{}!]/g, '\\$&')}`
   const argv = ['--files', '--sort=path', '--null', '--path-separator=/', ...request.includeHidden ? ['--hidden'] : [],
     ...request.respectGitignore ? [] : ['--no-ignore'], ...['.git', '.svn', '.hg', '.bzr', '.jj', '.sl', ...request.excludedPaths].map(exclude)]
   const raw = await command(binding, ['python3', '-c', WORKSPACE_ENUMERATE], binding.guestCwd, signal,
-    { ...SEARCH_CAPS, timeoutMs: limits.timeoutMs }, transport, JSON.stringify({ cwd: binding.guestCwd, argv, maxEntries, maxBytes: 1024 * 1024 }))
+    { ...SEARCH_CAPS, timeoutMs: limits.timeoutMs }, transport, JSON.stringify({ cwd: binding.guestCwd, argv, maxEntries, maxBytes: 1024 * 1024, stderrMaxBytes, graceMs }))
   let data: { paths: string[]; incomplete: boolean }
   try {
     data = JSON.parse(raw) as typeof data
     if (!Array.isArray(data.paths) || data.paths.some(path => typeof path !== 'string') || typeof data.incomplete !== 'boolean') throw new Error('invalid')
   } catch { throw new GuestSearchError('SEARCH_INVALID_OUTPUT', 'The guest returned invalid workspace discovery data') }
   const needle = query.toLowerCase(), byPath = query.includes('/'), entries = new Map<string, 'file' | 'directory'>()
-  let incomplete = data.incomplete
   const admit = (path: string, kind: 'file' | 'directory') => {
-    if (entries.size >= maxEntries) { incomplete = true; return }
     const value = byPath ? path : posix.basename(path)
     if (value.toLowerCase().includes(needle)) entries.set(path, kind)
   }
@@ -208,7 +207,7 @@ export async function guestWorkspaceSearch(binding: WslSearchBinding, request: W
   }
   const matches = [...entries].map(([path, type]) => ({ path, type })).sort((a, b) => a.path.split('/').length - b.path.split('/').length || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
   signal.throwIfAborted()
-  return { matches: matches.slice(0, maxResults), truncated: matches.length > maxResults, incomplete: incomplete || data.paths.length > maxEntries }
+  return { matches: matches.slice(0, maxResults), truncated: matches.length > maxResults, incomplete: data.incomplete || data.paths.length > maxEntries }
 }
 const recovery = (value: { truncated: boolean; spill?: string }) => !value.truncated ? '' : value.spill
   ? `\n\nFull result stored at: ${value.spill}. Use read to inspect it.` : '\n\nThe complete result could not be saved; narrow the query to see more.'

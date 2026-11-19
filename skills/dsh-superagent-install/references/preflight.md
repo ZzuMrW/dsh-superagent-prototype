@@ -21,7 +21,7 @@
 
 ## A 专项
 
-- 工作形态和源码来源分开：Desktop 0.2.2-rc.3 在 A/B 都优先推荐当前分支；A 的具体原生运行组合未验证则停准备，不据此假称已适配、不自动改 B 或降级。依赖/版本以已选来源的 manifest 为准。
+- 工作形态和源码来源分开：Desktop 0.2.2-rc.5 在 A/B 都优先推荐当前分支；A 的具体原生运行组合未验证则停准备，不据此假称已适配、不自动改 B 或降级。依赖/版本以已选来源的 manifest 为准。
 - 同侧 POSIX 独立 Web/tmux 是官方默认方案；已有 Desktop/profile 先确认是否沿用，不自动新开 Host。若批准新建独立 profile，再查端口/stateDir；已有 profile 禁止运行破坏性的 from-default-profile。
 - Feishu/auto-merge 是独立选择，必须核实实际所选代码版本支持能力，凭据由用户准备；不要因沿用默认工作形态就宣称当前分支支持飞书。官方建议的 hourly recovery 单列，只有用户明确请求才创建。
 

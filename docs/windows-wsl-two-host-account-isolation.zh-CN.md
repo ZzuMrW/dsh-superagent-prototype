@@ -4,9 +4,9 @@
 
 **版本：v1.1（公开脱敏版，保留全部 47 节）｜安装说明更新：2026-11-15（北京时间）**
 
-> **本分支优先入口：** [SETUP](<../SETUP.md>) / [Windows Desktop + WSL 安装、升级与回滚](<../WSL-ADAPTER.md>) / [支持矩阵](<../WSL-VERIFICATION.md>)。以下双机、飞书、子代理与 GitCode 场景仅保留参考，本轮不开发、不自动启动第二 Linux DSH/第二服务/定时巡检或真实接单。source 仍 Root 总集成，guest-local/Windows 本地盘、自定义 mount 及独立 Windows ticket override 的已测完整 Runtime 组合已通过，候选代码内部已接通 special API verifiedExecution:true 用于隔离完整 Runtime 测试，不是部署授权；实际旧 v2 迁移、一致 DB 回滚、真实 GitHub 业务及浏览器视觉仍未验，当前生产未部署。
+> **本分支优先入口：** [SETUP](<../SETUP.md>) / [Windows Desktop + WSL 安装、升级与回滚](<../WSL-ADAPTER.md>) / [支持矩阵](<../WSL-VERIFICATION.md>)。以下双机、飞书、子代理与 GitCode 场景仅保留参考，本轮不开发、不自动启动第二 Linux DSH/第二服务/定时巡检或真实接单。source 仍 Root 总集成，guest-local/Windows 本地盘、自定义 mount 及独立 Windows ticket override 的已测完整 Runtime 组合已通过，候选代码内部已接通 special API verifiedExecution:true 用于隔离完整 Runtime 测试，不是部署授权；旧 v2 迁移、实际数据库回滚、更完整的 GitHub 业务闭环及浏览器视觉不在隔离验收范围。
 >
-> 当前固定目标是 Desktop 0.2.2-rc.3、Node ≥24.9.0、dsh-superagent 0.2.0-wsl.1。源码只在 WSL 的 `feature/windows-wsl-hardening` 分支维护，旧 main 无适配。部署制品为一个 self-contained tgz/唯一 patch，不再“主包 + @local 配置层”；raw runtime 默认 disabled、机器版 runtime enabled、watcher 默认 disabled。历史 linked 解析 workaround 不是 Core 直接依赖硬限制，dependencyClosure 递归 dependencies。此前 37/0 peer 检查仅来自 Linux 开发 checkout，并非 ASAR Host；Host 实查 36 个可 resolve，另一个 `@deepseek-ai/dsh-client-ui-slots` 为纯 type contract、无产物 JS 引用，不能称 37 个 Host peer 全部 resolve，也不是漏洞审计或零漏洞结论。
+> 当前固定目标是 Desktop 0.2.2-rc.5、Node ≥24.9.0、dsh-superagent 0.2.0-wsl.5。源码只在 WSL 的 `feature/windows-wsl-hardening` 分支维护，旧 main 无适配。部署制品为一个 self-contained tgz/唯一 patch，不再“主包 + @local 配置层”；raw runtime 默认 disabled、机器版 runtime enabled、watcher 默认 disabled。历史 linked 解析 workaround 不是 Core 直接依赖硬限制，dependencyClosure 递归 dependencies。此前 37/0 peer 检查仅来自 Linux 开发 checkout，并非 ASAR Host；Host 实查 36 个可 resolve，另一个 `@deepseek-ai/dsh-client-ui-slots` 为纯 type contract、无产物 JS 引用，不能称 37 个 Host peer 全部 resolve，也不是漏洞审计或零漏洞结论。
 
 **目标：外网开发、内网测试，先以 GitHub Issue 明确派单跑通流程。**
 
@@ -868,9 +868,9 @@ git clone --branch feature/windows-wsl-hardening --single-branch \
   "$HOME/src/dsh-superagent-prototype"
 ```
 
-不要覆盖已存在原仓库，不复制开发源码到 Windows。Node ≥24.9.0、Desktop 0.2.2-rc.3 固定验收；构建后的生成器必须提供 `--out=... --state-dir=... --distro=... --user=... --work-root=...`，输出单个 dsh-superagent 0.2.0-wsl.1 tgz，由 Core 插件管理器安装。真实 wslpath 支持自定义 mount；workRoot 可为 Linux、Windows local drive、同 target distro UNC，仍须 Host realpath/stat 登记；Host SQLite 只能可靠本地 Windows disk（含实际盘检查），不能 UNC/network。
+不要覆盖已存在原仓库，不复制开发源码到 Windows。Node ≥24.9.0、Desktop 0.2.2-rc.5 固定验收；构建后的生成器必须提供 `--out=... --state-dir=... --distro=... --user=... --work-root=...`，输出单个 dsh-superagent 0.2.0-wsl.5 tgz，由 Core 插件管理器安装。真实 wslpath 支持自定义 mount；workRoot 可为 Linux、Windows local drive、同 target distro UNC，仍须 Host realpath/stat 登记；Host SQLite 只能可靠本地 Windows disk（含实际盘检查），不能 UNC/network。
 
-UID0/1000、guest-local/Windows 本地盘、自定义 mount 及独立 Windows ticket override 的已测完整 Runtime 组合已通过；仅限已测环境，不替代实际旧 v2 迁移、一致 DB 回滚、真实 GitHub 业务或浏览器视觉验收，当前生产未部署。普通 WSL workspace/XINY 插件可保留；本适配不再用其 private provider，均为 own public adapters。managed changes/watch unsupported，手动刷新可用，不叫 livewatch 已完成。不支持任意 bind/net mounts、所有版本或 OS sandbox。
+UID0/1000、guest-local/Windows 本地盘、自定义 mount 及独立 Windows ticket override 的已测完整 Runtime 组合已通过；仅限已测环境，不替代实际旧 v2 迁移、一致 DB 回滚、完整 GitHub 业务闭环或浏览器视觉验收。普通 WSL workspace/XINY 插件可保留；本适配不再用其 private provider，均为 own public adapters。managed changes/watch unsupported，手动刷新可用，不叫 livewatch 已完成。不支持任意 bind/net mounts、所有版本或 OS sandbox。
 
 新机器的完整备份、暂停/quiescence、单包生成/安装、首次配置、旧 v2 升级和回滚见 [Windows 操作流程](<../WSL-ADAPTER.md>)。先确认新目标/备份，首次 source/允许名单/模型/prepare/maxWorkers=1 和 legacy binding，再显式恢复；不要直接套用下方历史 Web 命令。
 

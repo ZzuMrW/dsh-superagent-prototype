@@ -1,6 +1,6 @@
 # Windows Desktop → WSL：安装、升级与回滚
 
-本分支基于官方上游 `8c32a9dc5d72c033816c6a8110b37f40cf94fba4`，是实验研究适配，不是官方发行或生产部署承诺。固定验收组合：**DSH Desktop 0.2.2-rc.3、Node ≥24.9.0、dsh-superagent 0.2.0-wsl.1**；pnpm 版本见 [manifest](<package.json>)（11.7.0）。旧 `main` 无此适配，不能通吃所有 DSH/OS 版本。
+本分支基于官方上游 `8c32a9dc5d72c033816c6a8110b37f40cf94fba4`，是实验研究适配，不是官方发行或生产部署承诺。当前目标组合：**DSH Desktop 0.2.2-rc.5、Node ≥24.9.0、dsh-superagent 0.2.0-wsl.5**；pnpm 版本见 [manifest](<package.json>)（11.7.0）。旧 `main` 无此适配，不能通吃所有 DSH/OS 版本。
 
 ## 运行边界和支持矩阵
 
@@ -9,7 +9,7 @@
 - `stateDir` 必须是可靠 Windows **本地盘符**绝对路径，且要检查实际盘类型/realpath，不能因有盘符就把映射网络盘判为本地；SQLite 不放 UNC/network/guest 盘。
 - `wsl.workRoot`/执行根可输入 Linux 绝对路径、Windows local drive 绝对路径、**同一 target distro** 的 `\\wsl.localhost\<WSL_DISTRO>\...`（或 `\\wsl$\...`）。真实 `wslpath` 转换支持自定义 automount，不能硬编码 `/mnt`，也不再一刀切 guest-only。不同 distro UNC、网络 UNC/任意 bind 或 network mounts 不在支持承诺内。
 - 每个 workspace 仍须被 Windows Host `realpath/stat` 成功登记，并验证 Host/guest 指向同一目录；非默认 UID 的 guest 访问通过，不意味着 Host 一定能访问其私有目录。缺证据 fail closed，不回退到默认 distro/user/root。
-- UID0/1000、guest-local/Windows local drive、自定义 `/windows` mount 及独立 Windows ticket override 的已测完整 Runtime 组合已通过；不是任意 bind/net mount 或所有用户/版本保证。候选代码内部已接通 special API `verifiedExecution:true`，不是部署授权，当前生产未部署。实际旧 v2 迁移、一致 DB 回滚、真实 GitHub 业务及浏览器视觉仍未验，详见验收摘要。
+- UID0/1000、guest-local/Windows local drive、自定义 `/windows` mount 及独立 Windows ticket override 的已测完整 Runtime 组合已通过；不是任意 bind/net mount 或所有用户/版本保证。隔离测试使用 `verifiedExecution:true`，不是部署授权。旧 v2 迁移、实际数据库回滚、完整 GitHub 业务闭环及浏览器视觉仍未验；单次接单验证的范围见验收摘要。
 - managed `changes`/watch **明确 unsupported**，手动刷新可用，不叫 livewatch 完成。WSL managed 子代理、飞书、双机调度与 GitCode 本轮不开发。wrapper/禁用命令不是 OS sandbox，实际 OS 用户权限就是进程权限。
 
 更多证据层级见 [阶段性验收记录](<WSL-VERIFICATION.md>)。
@@ -18,7 +18,7 @@
 
 以下都是**给操作者的模板，不表示本文已执行**。先替换占位符，不把账号、机器、业务路径、model 或证据写回公开仓库；不要复制凭据或把 Token 发给 Agent。
 
-1. 确认当前 Desktop 确实为 0.2.2-rc.3、有效 profile、原包版本/启用层、受管 Session 预设、stateDir 和原安装制品位置。用 Core 插件管理器 `list_bundles` / `list_plugins` 取得真实 identifier；不重建现有 profile、不把整份模板覆盖用户 patch。
+1. 确认当前 Desktop 确实为 0.2.2-rc.5、有效 profile、原包版本/启用层、受管 Session 预设、stateDir 和原安装制品位置。用 Core 插件管理器 `list_bundles` / `list_plugins` 取得真实 identifier；不重建现有 profile、不把整份模板覆盖用户 patch。
 2. 在改动前先备份配置。暂停 processing，关闭来源入口，并回读确认。示例仅对**已经核对的本机原服务 URL**使用，不另启动服务：
 
    ```powershell
@@ -95,7 +95,7 @@ node scripts/make-local-wsl-bundle.mjs \
 
 也可将 `--out` 换为该 Windows 目录在本发行版的**真实** Linux mount 路径；`--work-root` 可换为 `C:\<LOCAL_WORKSPACE>` 或同 distro UNC。生成器做语法/输出位置检查，不代替 Runtime 的真实磁盘、身份和挂载诊断。不要把 source-code clone、artifact、state 和工单工作区混在一起。
 
-输出仅有一个部署 tgz：`dsh-superagent-0.2.0-wsl.1.tgz`（目录内还保留 stage 和本地 npm cache）。单包含 runtime/client/resources、全部公开子路径和**唯一** `cordis.patch.yml`，不嵌主包依赖、不另造 `@local` 配置包。
+输出仅有一个部署 tgz：`dsh-superagent-0.2.0-wsl.5.tgz`（目录内还保留 stage 和本地 npm cache）。单包含 runtime/client/resources、全部公开子路径和**唯一** `cordis.patch.yml`，不嵌主包依赖、不另造 `@local` 配置包。
 
 - source/raw bundle 的 runtime 可以且默认 `disabled: true`，未配置，不可当作机器版直接开工。
 - 生成机器版只把同一 runtime 改为启用并写入 stateDir/distro/user/workRoot；GitHub/Feishu watchers 仍默认 disabled。
@@ -106,7 +106,7 @@ node scripts/make-local-wsl-bundle.mjs \
 在**已确认的 Windows 目标 profile**执行 Core 工具调用（JSON 是工具参数模板，不是 shell 命令）：
 
 ```json
-{"action":"install_bundle","target":"C:\\DSH-Releases\\<NEW_RELEASE_DIRECTORY>\\dsh-superagent-0.2.0-wsl.1.tgz"}
+{"action":"install_bundle","target":"C:\\DSH-Releases\\<NEW_RELEASE_DIRECTORY>\\dsh-superagent-0.2.0-wsl.5.tgz"}
 ```
 
 检查 `application`、warnings、实际 bundle/plugin 配置与运行状态。若报告 `restart-required`/pending，只有经确认重启**现有目标 Host**后才算加载新代码；不能因页面还显示旧功能就反复安装，也不能承诺 HMR。不得手工改整个 profile 的 manifest/patch 或在其中跑 pnpm。

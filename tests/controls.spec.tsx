@@ -3,11 +3,59 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { act, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { expect, it } from 'vitest'
-import { Modal, SegmentedTabs } from '../src/client/controls.tsx'
+import { expect, it, vi } from 'vitest'
+import { InfoTip, Modal, SegmentedTabs } from '../src/client/controls.tsx'
 
 declare global { var IS_REACT_ACT_ENVIRONMENT: boolean }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
+
+it.each([
+  { host: 'root', overlay: '', resolvedTop: '0px', anchorTop: 100, expectedTop: 52 },
+  { host: 'root', overlay: '', resolvedTop: '0px', anchorTop: 40, expectedTop: 68 },
+  { host: 'root', overlay: '20px', resolvedTop: '20px', anchorTop: 100, expectedTop: 52 },
+  { host: 'root', overlay: '68px', resolvedTop: '68px', anchorTop: 100, expectedTop: 128 },
+  { host: 'root', overlay: 'calc(var(--dsh-frame-top-clearance) + 20px)', resolvedTop: '68px', anchorTop: 100, expectedTop: 128 },
+  { host: 'body', overlay: 'calc(var(--dsh-frame-top-clearance) + 20px)', resolvedTop: '68px', anchorTop: 100, expectedTop: 128 },
+  { host: 'body', overlay: '68px', resolvedTop: '68px', anchorTop: 10, expectedTop: 68 },
+  { host: 'body', overlay: '8px', resolvedTop: '8px', anchorTop: 0, expectedTop: 28 },
+  { host: 'root', overlay: '68px', resolvedTop: '68px', anchorTop: 116, expectedTop: 68 },
+  { host: 'root', overlay: '', resolvedTop: 'auto', anchorTop: 100, expectedTop: 52 },
+])('positions tooltips using browser-resolved top: $host $overlay at $anchorTop', async ({ host, overlay, resolvedTop, anchorTop, expectedTop }) => {
+  const owner = host === 'root' ? document.documentElement : document.body
+  const previousStyle = owner.getAttribute('style')
+  owner.style.setProperty('--dsh-frame-top-clearance', '48px')
+  if (overlay) owner.style.setProperty('--dsh-frame-overlay-top', overlay)
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container)
+  const computedStyle = window.getComputedStyle.bind(window)
+  const styles = vi.spyOn(window, 'getComputedStyle').mockImplementation(element => {
+    const style = computedStyle(element)
+    if (element.getAttribute('role') === 'tooltip') {
+      expect((element as HTMLElement).style.top).toBe('var(--dsh-frame-overlay-top, 0px)')
+      expect((element as HTMLElement).style.visibility).toBe('hidden')
+      style.top = resolvedTop
+    }
+    return style
+  })
+  const bounds = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    return this.getAttribute('role') === 'tooltip'
+      ? new DOMRect(0, 0, 100, 40) : new DOMRect(100, anchorTop, 20, 20)
+  })
+  try {
+    await act(async () => { root.render(<InfoTip text='Details' />) })
+    await act(async () => { container.querySelector('button')!.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+    const tooltip = document.querySelector<HTMLElement>('[role=tooltip]')!
+    expect(tooltip.parentElement).toBe(document.body)
+    expect(tooltip.style.top).toBe(`${expectedTop}px`)
+    expect(tooltip.style.left).toBe('60px')
+    expect(tooltip.style.visibility).toBe('visible')
+  } finally {
+    act(() => { root.unmount() })
+    container.remove(); bounds.mockRestore(); styles.mockRestore()
+    if (previousStyle === null) owner.removeAttribute('style')
+    else owner.setAttribute('style', previousStyle)
+  }
+})
 
 it('imports no DSH client runtime package, only React and type declarations', () => {
   const dir = join(process.cwd(), 'src/client')

@@ -223,10 +223,13 @@ export function InfoTip({ text, icon = 'question', warn }: { text: string; icon?
     const target = anchor.current, element = bubble.current
     if (!open || !target || !element) return
     const margin = 12, gap = 8
+    element.style.top = 'var(--dsh-frame-overlay-top, 0px)'
+    const resolvedTop = getComputedStyle(element).top
+    const safeTop = Math.max(margin, /^-?\d+(?:\.\d+)?px$/.test(resolvedTop) ? Number.parseFloat(resolvedTop) : 0)
     const a = target.getBoundingClientRect(), b = element.getBoundingClientRect()
-    const above = a.top - gap - b.height >= margin
+    const above = a.top - gap - b.height >= safeTop
     element.style.left = `${Math.max(margin, Math.min(a.left + a.width / 2 - b.width / 2, window.innerWidth - margin - b.width))}px`
-    element.style.top = `${above ? a.top - gap - b.height : a.bottom + gap}px`
+    element.style.top = `${Math.max(safeTop, above ? a.top - gap - b.height : a.bottom + gap)}px`
     element.style.visibility = 'visible'
   }, [open])
   useEffect(() => {

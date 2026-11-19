@@ -1,5 +1,9 @@
 /** Guest search always uses the bound execution identity and public fixed rg argv builders. */
 import { describe, expect, it, vi } from 'vitest'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { guestGlob, guestGrep, guestWorkspaceSearch, SEARCH_CAPS, type GuestSearchTransport, type WslSearchBinding } from '../src/wsl-tools.ts'
 import { environmentSnapshot, freezeExecutionSnapshot, freezeTarget } from '../src/execution/target.ts'
 import { testDeployment } from './fixtures/deployment.ts'
@@ -85,6 +89,7 @@ describe('owned guest search', () => {
     const payload = JSON.parse(calls[0]![1].stdin as string)
     expect(payload.argv).toContain('--hidden'); expect(payload.argv).toContain('--no-ignore')
     expect(payload.argv).toContain('--glob=!node\\[modules\\]')
+    expect(payload).toMatchObject({ stderrMaxBytes: 65536, graceMs: 3000 })
     expect(calls[0]![0].wsl?.user).toBe('developer')
     expect(calls[0]![1].argv[0]).toBe('python3')
   })
@@ -95,6 +100,66 @@ describe('owned guest search', () => {
     expect(result).toEqual({ matches: [{ path: 'a.ts', type: 'file' }], truncated: true, incomplete: true })
     await expect(guestWorkspaceSearch(binding(), request, signal(), undefined,
       async () => JSON.stringify({ paths: ['../outside.ts'], incomplete: false }))).rejects.toMatchObject({ code: 'SEARCH_INVALID_OUTPUT' })
+  })
+  it.skipIf(process.platform !== 'linux').each([
+    { name: 'returns the file and its parent at the exact scan budget', paths: ['foo/foo.txt'], query: 'foo', maxEntries: 1, maxResults: 10,
+      expected: { matches: [{ path: 'foo', type: 'directory' }, { path: 'foo/foo.txt', type: 'file' }], truncated: false, incomplete: false } },
+    { name: 'truncates only after including inferred directories', paths: ['foo/foo.txt'], query: 'foo', maxEntries: 1, maxResults: 1,
+      expected: { matches: [{ path: 'foo', type: 'directory' }], truncated: true, incomplete: false } },
+    { name: 'marks an extra listed file incomplete independently of result truncation', paths: ['foo/foo.txt', 'foo/second.txt'], query: 'foo', maxEntries: 1, maxResults: 10,
+      expected: { matches: [{ path: 'foo', type: 'directory' }, { path: 'foo/foo.txt', type: 'file' }], truncated: false, incomplete: true } },
+    { name: 'charges nonmatching files against the scan budget', paths: ['a.txt', 'foo/foo.txt'], query: 'foo', maxEntries: 1, maxResults: 10,
+      expected: { matches: [], truncated: false, incomplete: true } },
+    { name: 'matches all inferred parents for path queries', paths: ['foo/bar/foo.txt'], query: 'foo/bar', maxEntries: 1, maxResults: 10,
+      expected: { matches: [{ path: 'foo/bar', type: 'directory' }, { path: 'foo/bar/foo.txt', type: 'file' }], truncated: false, incomplete: false } },
+    { name: 'deduplicates shared parents without spending scan budget', paths: ['foo/first.txt', 'foo/second.txt'], query: 'FOO', maxEntries: 2, maxResults: 10,
+      expected: { matches: [{ path: 'foo', type: 'directory' }], truncated: false, incomplete: false } },
+  ])('$name', async ({ paths, query, maxEntries, maxResults, expected }) => {
+    const root = mkdtempSync(join(tmpdir(), 'owned-wsl-search-'))
+    try {
+      for (const path of paths) {
+        const file = join(root, path)
+        mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, '')
+      }
+      const transport: GuestSearchTransport = async (_machine, request) => {
+        const child = spawnSync(request.argv[0]!, request.argv.slice(1), { cwd: root, input: request.stdin, encoding: 'utf8', timeout: 10000 })
+        if (child.error) throw child.error
+        expect(child.status, child.stderr).toBe(0)
+        return child.stdout
+      }
+      const result = await guestWorkspaceSearch({ ...binding(), guestCwd: root },
+        { query, excludedPaths: [], includeHidden: false, respectGitignore: false }, signal(),
+        { maxEntries, maxResults, timeoutMs: 10000 }, transport)
+      expect(result).toEqual(expected)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+  it('honors native configured scan and result caps without an undocumented adapter clamp', async () => {
+    const paths = Array.from({ length: 2001 }, (_, index) => `foo-${index}.txt`)
+    const transport = vi.fn<GuestSearchTransport>(async () => JSON.stringify({ paths, incomplete: false }))
+    const result = await guestWorkspaceSearch(binding(), { query: 'foo', excludedPaths: [], includeHidden: false, respectGitignore: true }, signal(),
+      { maxEntries: 100001, maxResults: 2001, timeoutMs: 1000 }, transport)
+    expect(result.matches).toHaveLength(2001)
+    expect(result.truncated).toBe(false)
+    expect(JSON.parse(transport.mock.calls[0]![1].stdin as string).maxEntries).toBe(100001)
+  })
+  it('forwards configured workspace diagnostic and termination budgets to the guest enumerator', async () => {
+    const transport = vi.fn<GuestSearchTransport>(async () => JSON.stringify({ paths: [], incomplete: false }))
+    await guestWorkspaceSearch(binding(), { query: 'foo', excludedPaths: [], includeHidden: false, respectGitignore: true }, signal(),
+      { maxEntries: 1, maxResults: 10, timeoutMs: 1234, stderrMaxBytes: 9876, graceMs: 4321 }, transport)
+    const request = transport.mock.calls[0]![1]
+    expect(request.timeoutMs).toBe(1234)
+    expect(JSON.parse(request.stdin as string)).toMatchObject({ maxEntries: 1, stderrMaxBytes: 9876, graceMs: 4321 })
+    expect(request.argv[2]).toContain("if len(stderr)>q['stderrMaxBytes']: del stderr[:-q['stderrMaxBytes']]")
+    expect(request.argv[2]).toContain("p.wait(timeout=q['graceMs']/1000)")
+  })
+  it.each([
+    { stderrMaxBytes: 0 }, { stderrMaxBytes: -1 }, { stderrMaxBytes: 1.5 }, { stderrMaxBytes: Infinity },
+    { graceMs: 0 }, { graceMs: -1 }, { graceMs: 1.5 }, { graceMs: NaN },
+  ])('rejects invalid workspace process budgets %j before transport', async budgets => {
+    const transport = vi.fn<GuestSearchTransport>(async () => '')
+    await expect(guestWorkspaceSearch(binding(), { query: 'foo', excludedPaths: [], includeHidden: false, respectGitignore: true }, signal(),
+      { maxEntries: 1, maxResults: 10, timeoutMs: 1000, ...budgets }, transport)).rejects.toMatchObject({ code: 'SEARCH_INVALID_ARGS' })
+    expect(transport).not.toHaveBeenCalled()
   })
   it('honors the owning runtime lifetime, not only the tool caller signal', async () => {
     const lifetime = new AbortController(), target = { ...binding(), lifetime: lifetime.signal }

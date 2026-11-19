@@ -13,27 +13,30 @@ import { FsTargetKey, FsVersion } from '@deepseek-ai/dsh-fs'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { SessionExecutionRegistry } from '../src/execution/registry.ts'
 import { freezeTarget, freezeExecutionSnapshot, environmentSnapshot } from '../src/execution/target.ts'
-import SessionWorkspaceFiles, { configureWorkspaceSessionRegistry } from '../src/workspace-files.ts'
+import SessionWorkspaceFiles, { configureWorkspaceSessionRegistry, lookupWorkspaceSession } from '../src/workspace-files.ts'
 import { configureGuestFsResolver } from '../src/wsl-fs.ts'
 
 it('selected-user file-reference discovery preserves bounded ranking and never traverses symlink escapes', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'file-reference-world-')), root = join(dir, 'project')
   try {
+    await mkdir(join(root, '.git'), { recursive: true })
     await mkdir(join(root, 'nested'), { recursive: true }); await mkdir(join(dir, 'outside'))
     await writeFile(join(root, 'nested', 'deep.md'), 'not read by discovery'); await writeFile(join(root, '.hidden'), 'hidden')
     await writeFile(join(dir, 'outside', 'never-offer-secret'), 'secret')
     await symlink(join(dir, 'outside'), join(root, 'escape'))
-    const list = async (query: string) => {
+    const list = async (query: string, maxEntries = 100) => {
       const child = spawn('python3', ['-c', GUEST_FILE_REFERENCES], { stdio: ['pipe', 'pipe', 'pipe'] })
       let output = '', error = ''
       const result = new Promise<string>((resolve, reject) => {
         child.stdout.on('data', data => output += data); child.stderr.on('data', data => error += data)
         child.on('error', reject); child.on('close', code => code === 0 ? resolve(output) : reject(new Error(error)))
       })
-      child.stdin.end(JSON.stringify({ root, query, excluded: ['.git'], maxEntries: 100, maxResults: 20 }))
+      child.stdin.end(JSON.stringify({ root, query, excluded: ['.git'], maxEntries, maxResults: 20 }))
       return JSON.parse(await result)
     }
     expect(await list('')).toEqual([{ path: 'nested', kind: 'directory' }])
+    expect(await list('', 1)).toEqual([{ path: 'nested', kind: 'directory' }]) // .git must not spend the candidate budget.
+    expect(await list('', 0)).toEqual([])
     expect(await list('deep')).toEqual([{ path: 'nested/deep.md', kind: 'file' }])
     expect(await list('nested/')).toEqual([{ path: 'nested/deep.md', kind: 'file' }])
     expect(await list('escape/')).toEqual([])
@@ -73,10 +76,23 @@ function setup() {
     } } : undefined))
   new SessionWorkspaceFiles(ctx, config)
   // Exercise the real public SDK traceable wrapper, not a raw constructed Service instance.
-  return { files: ctx.get('workspaceFiles') as SessionWorkspaceFiles, host, calls, ctx }
+  return { files: ctx.get('workspaceFiles') as SessionWorkspaceFiles, host, calls, ctx, registry }
 }
 
 describe('public WorkspaceFiles Session routing', () => {
+  it.each(['dispose', 'replace'] as const)('rejects a pending lookup when its Runtime owner is %s', async action => {
+    const { ctx, registry } = setup()
+    const record = await registry.lookup('managed')
+    let complete!: (value: typeof record) => void
+    vi.spyOn(registry, 'lookup').mockImplementationOnce(() => new Promise(resolve => { complete = resolve }))
+    const pending = lookupWorkspaceSession(ctx, 'managed', signal())
+    const newBinding = vi.fn(() => { throw new Error('Stale lookup must never use a replacement binding') })
+    if (action === 'dispose') disposers[0]!()
+    else disposers.push(configureWorkspaceSessionRegistry(new SessionExecutionRegistry({ load: () => undefined, isManagedSession: () => true }), newBinding))
+    complete(record)
+    await expect(pending).resolves.toMatchObject({ kind: 'blocked', code: 'SESSION_BINDING_STALE' })
+    expect(newBinding).not.toHaveBeenCalled()
+  })
   it('while Runtime is inert, delegates only metadata-proven native lineage and blocks cold WSL descendants', async () => {
     const { files, host, ctx } = setup()
     for (const dispose of disposers.splice(0)) dispose()
@@ -174,6 +190,8 @@ describe('public WorkspaceFiles Session routing', () => {
   })
   it('explicitly refuses guest change observation instead of Host watching', async () => {
     const { files } = setup()
-    await expect(files.changes(scope('managed'), '.', signal())[Symbol.asyncIterator]().next()).rejects.toThrow('unsupported')
+    await expect(files.changes(scope('managed'), '.', signal())[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      code: 'workspace-file/watch-unsupported', details: { path: '.' },
+    })
   })
 })

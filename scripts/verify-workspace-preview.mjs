@@ -24,7 +24,7 @@ assert.ok(!options.user.startsWith('-') && !/[\s\x00-\x1f\x7f/:\\]/.test(options
 const installed = createRequire(resolve(options['install-anchor']));
 const cli = installed('./package.json');
 assert.equal(cli.name, '@deepseek-ai/dsh');
-assert.equal(cli.version, '0.2.2-rc.3');
+assert.equal(cli.version, '0.2.2-rc.5');
 // Model Core's installed-peer resolution for this standalone verification process.
 // There are no machine paths in the production adapter; the test anchor is explicit.
 const builtRoot = new URL('../lib/', import.meta.url).href;
@@ -118,7 +118,7 @@ try {
   // Do not silently reinterpret a WSL path in a native Windows Session.
   await assert.rejects(request('read', 'native', { path: guestRoot + '/中文 space.md', range: {} }), error => error.code === 'workspace-file/not-found');
   const watch = await ctx.typertGateway.stream({ namespace: 'workspaceFiles', method: 'changes', args: { workspaceFileScopeId: 'managed', path: '中文 space.md' }, peer });
-  await assert.rejects(watch[Symbol.asyncIterator]().next(), /unsupported/);
+  await assert.rejects(watch[Symbol.asyncIterator]().next(), error => error.code === 'workspace-file/watch-unsupported' && error.details?.path === '中文 space.md');
   // Native change observation remains functional; managed files retain explicit
   // reread rather than silently falling back to Host watchers.
   const nativeWatchControl = new AbortController();

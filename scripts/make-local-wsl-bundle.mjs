@@ -112,7 +112,7 @@ function inventory(sourceRoot, manifest) {
 export function generateBundle(options, { sourceRoot = root, convert = systemPathConverter, pack } = {}) {
   const locations = resolveLocations(options, convert);
   const manifest = JSON.parse(readFileSync(join(sourceRoot, 'package.json'), 'utf8'));
-  if (manifest.name !== 'dsh-superagent' || manifest.version !== '0.2.0-wsl.3') throw new Error('Unexpected package identity/version');
+  if (manifest.name !== 'dsh-superagent' || manifest.version !== '0.2.0-wsl.5') throw new Error('Unexpected package identity/version');
   if (manifest.dependencies?.['dsh-superagent'] || manifest.dependencies?.['dsh-wsl-workspace']) throw new Error('A single bundle cannot nest a main bundle or workspace adapter');
   if (Object.values(manifest.dependencies ?? {}).some(value => /^(?:file:|link:|workspace:)/.test(value))) throw new Error('A release tarball cannot depend on local/nested packages');
   const files = inventory(sourceRoot, manifest);

@@ -9,8 +9,8 @@ import { key, latestAssignment, latestReport, liveTicket, runningAssignment, thr
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
   from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
-import type { ExecutionSnapshot } from '../execution/target.ts'
-import { runAsWorker, verifyDirectory, workerEnvironment } from '../infra/environment.ts'
+import { commandEnvironment, type ExecutionSnapshot } from '../execution/target.ts'
+import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
 import { Later, type Effects } from '../app/effects.ts'
@@ -256,6 +256,11 @@ export class DshExecutor implements Executor {
   private async prepareDirectory(ticket: Ticket): Promise<void> {
     const directory = ticket.execution?.directory ?? ''
     const machine = this.host.machine
+    // Prepare runs before a worker Session exists, but must use the same verified generation as that Session.
+    const snapshot = machine.wsl ? this.host.executionSnapshot?.() : undefined
+    if (machine.wsl && (!snapshot || snapshot.target.distro !== machine.wsl.distro || snapshot.target.user !== machine.wsl.user)) {
+      throw new PrepareFailed('WSL workspace preparation requires the current verified execution snapshot')
+    }
     const parent = machine.wsl ? posix.dirname(directory) : dirname(directory)
     if (machine.wsl) await guestFs(machine, 'mkdir', parent, this.host.lifetime)
     else await mkdir(parent, { recursive: true })
@@ -263,9 +268,9 @@ export class DshExecutor implements Executor {
     const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
     // Enforce a timeout so a hung prepare command (such as on a credential prompt) fails the ticket instead of holding a worker slot indefinitely.
     const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
-    const workerEnv = machine.wsl ? await workerEnvironment(machine) : {}
+    const workerEnv = snapshot ? commandEnvironment(snapshot.environment) : {}
     const prepare = () => machine.wsl ? runWsl(machine, { argv: ['sh', '-c', command], cwd: parent,
-      signal, timeoutMs: PREPARE_TIMEOUT_MS, env: { ...workerEnv, ...env } })
+      signal, timeoutMs: PREPARE_TIMEOUT_MS, expectedIdentity: snapshot!.target, env: { ...env, ...workerEnv } })
       : runAsWorker(this.host.context.subprocess, ['sh', '-c', command], parent, signal, env)
     if (command) await prepare().catch(async (error: unknown) => {
         // Remove an empty directory left by a failed prepare command so a later retry does not treat it as already prepared.
@@ -274,7 +279,7 @@ export class DshExecutor implements Executor {
       })
     if (machine.wsl) await guestFs(machine, 'mkdir', directory, this.host.lifetime)
     else await mkdir(directory, { recursive: true })
-    await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime, machine)
+    await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime, machine, snapshot)
   }
   /** Enqueues a `launch` effect for an accepted or resumed assignment; launches start in queue order as worker slots free up. */
   start(ticket: Ticket, assignment: Assignment): void {

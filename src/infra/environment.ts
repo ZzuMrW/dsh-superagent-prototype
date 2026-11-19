@@ -11,6 +11,7 @@ import type { SubprocessOutputReader, SubprocessRuntime } from '@deepseek-ai/dsh
 import type { Deployment } from '../deployment.ts'
 import { SetupError } from '../setup.ts'
 import { CliError } from './commands.ts'
+import { commandEnvironment, type ExecutionSnapshot } from '../execution/target.ts'
 
 const MARKER = '# Written by dsh-superagent on every start; edits are lost.'
 /** Markers of files written under the project's earlier names (`dsh-tag`, `dsh-go`, `dsh-freelancer`), which `dsh-superagent` owns and replaces too. */
@@ -183,10 +184,12 @@ export async function verifyEnvironment(deployment: Pick<Deployment, 'github' | 
  * Verifies that a ticket directory's local or worktree git config defines no custom `credential.*` or `http.*extraheader`
  * keys, which the agent's git would read from the repository's own config and act on.
  */
-export async function verifyDirectory(directory: string, subprocess: SubprocessRuntime, signal: AbortSignal, machine?: ExecutionMachine): Promise<void> {
+export async function verifyDirectory(directory: string, subprocess: SubprocessRuntime, signal: AbortSignal, machine?: ExecutionMachine, snapshot?: ExecutionSnapshot): Promise<void> {
   const keys = ['git', 'config', '-z', '--show-scope', '--get-regexp', '^(credential\\..*|http\\..*extraheader)$']
   // `git config --get-regexp` exits with code 1 when no keys match.
-  const run = machine?.wsl ? runWsl(machine, { argv: keys, cwd: directory, env: await workerEnvironment(machine), signal, timeoutMs: 60_000 })
+  const run = machine?.wsl ? runWsl(machine, { argv: keys, cwd: directory,
+    env: snapshot ? commandEnvironment(snapshot.environment) : await workerEnvironment(machine),
+    ...snapshot ? { expectedIdentity: snapshot.target } : {}, signal, timeoutMs: 60_000 })
     : runAsWorker(subprocess, keys, directory, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))
   const output = await run.catch((error: unknown) => {
     if (error instanceof CliError && error.exitCode === 1 || machine?.wsl && (error as { code?: unknown })?.code === 1) return ''
